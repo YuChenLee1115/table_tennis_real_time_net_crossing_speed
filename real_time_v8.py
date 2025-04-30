@@ -20,7 +20,7 @@ DEFAULT_FRAME_HEIGHT = 1080  # 預設影像高度
 DEFAULT_TABLE_LENGTH_CM = 120  # 乒乓球桌長度，單位 cm
 
 # 偵測相關參數
-DEFAULT_DETECTION_TIMEOUT = 0.1  # 球體偵測超時，超過此時間將重置軌跡
+DEFAULT_DETECTION_TIMEOUT = 0.08  # 球體偵測超時，超過此時間將重置軌跡
 DEFAULT_ROI_START_RATIO = 0.4  # ROI 區域開始比例 (左側)
 DEFAULT_ROI_END_RATIO = 0.6  # ROI 區域結束比例 (右側)
 DEFAULT_ROI_BOTTOM_RATIO = 0.9  # ROI 區域底部比例 (排除底部 20%)
@@ -37,12 +37,12 @@ OUTPUT_FOLDER = 'real_time_output'  # 輸出資料夾名稱
 # FMO (Fast Moving Object) 相關參數
 MAX_PREV_FRAMES = 3  # 保留前幾幀的最大數量
 OPENING_KERNEL_SIZE = (0, 0)  # 開運算內核大小
-CLOSING_KERNEL_SIZE = (25, 25)  # 閉運算內核大小
-THRESHOLD_VALUE = 3  # 二值化閾值
+CLOSING_KERNEL_SIZE = (20, 20)  # 閉運算內核大小
+THRESHOLD_VALUE = 4  # 二值化閾值
 
 # 球體偵測參數
-MIN_BALL_AREA = 8  # 最小球體面積
-MAX_BALL_AREA = 7000  # 最大球體面積
+MIN_BALL_AREA = 10  # 最小球體面積
+MAX_BALL_AREA = 6000  # 最大球體面積
 
 # 速度計算參數
 SPEED_SMOOTHING = 0.3  # 速度平滑因子
