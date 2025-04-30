@@ -17,7 +17,7 @@ DEFAULT_CAMERA_INDEX = 0  # 預設相機索引
 DEFAULT_TARGET_FPS = 60  # 預設目標 FPS
 DEFAULT_FRAME_WIDTH = 1920  # 預設影像寬度
 DEFAULT_FRAME_HEIGHT = 1080  # 預設影像高度
-DEFAULT_TABLE_LENGTH_CM = 200  # 乒乓球桌長度，單位 cm
+DEFAULT_TABLE_LENGTH_CM = 100  # 乒乓球桌長度，單位 cm
 
 # 偵測相關參數
 DEFAULT_DETECTION_TIMEOUT = 0.15  # 球體偵測超時，超過此時間將重置軌跡
