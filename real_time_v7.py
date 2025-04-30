@@ -17,10 +17,10 @@ DEFAULT_CAMERA_INDEX = 0  # 預設相機索引
 DEFAULT_TARGET_FPS = 60  # 預設目標 FPS
 DEFAULT_FRAME_WIDTH = 1920  # 預設影像寬度
 DEFAULT_FRAME_HEIGHT = 1080  # 預設影像高度
-DEFAULT_TABLE_LENGTH_CM = 100  # 乒乓球桌長度，單位 cm
+DEFAULT_TABLE_LENGTH_CM = 120  # 乒乓球桌長度，單位 cm
 
 # 偵測相關參數
-DEFAULT_DETECTION_TIMEOUT = 0.15  # 球體偵測超時，超過此時間將重置軌跡
+DEFAULT_DETECTION_TIMEOUT = 0.12  # 球體偵測超時，超過此時間將重置軌跡
 DEFAULT_ROI_START_RATIO = 0.3  # ROI 區域開始比例 (左側)
 DEFAULT_ROI_END_RATIO = 0.7  # ROI 區域結束比例 (右側)
 DEFAULT_ROI_BOTTOM_RATIO = 0.9  # ROI 區域底部比例 (排除底部 20%)
@@ -35,14 +35,14 @@ AUTO_STOP_AFTER_COLLECTION = False  # 修改：不要自動停止程序
 OUTPUT_FOLDER = 'real_time_output'  # 輸出資料夾名稱
 
 # FMO (Fast Moving Object) 相關參數
-MAX_PREV_FRAMES = 4  # 保留前幾幀的最大數量
+MAX_PREV_FRAMES = 3  # 保留前幾幀的最大數量
 OPENING_KERNEL_SIZE = (0, 0)  # 開運算內核大小
-CLOSING_KERNEL_SIZE = (11, 11)  # 閉運算內核大小
-THRESHOLD_VALUE = 12  # 二值化閾值
+CLOSING_KERNEL_SIZE = (19, 19)  # 閉運算內核大小
+THRESHOLD_VALUE = 5  # 二值化閾值
 
 # 球體偵測參數
-MIN_BALL_AREA = 15  # 最小球體面積
-MAX_BALL_AREA = 5000  # 最大球體面積
+MIN_BALL_AREA = 8  # 最小球體面積
+MAX_BALL_AREA = 7000  # 最大球體面積
 
 # 速度計算參數
 SPEED_SMOOTHING = 0.5  # 速度平滑因子
