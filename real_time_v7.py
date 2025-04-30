@@ -27,7 +27,7 @@ DEFAULT_ROI_BOTTOM_RATIO = 0.8  # ROI 區域底部比例 (排除底部 20%)
 MAX_TRAJECTORY_POINTS = 80  # 最大軌跡點數
 
 # 新增: 中心線偵測參數
-CENTER_LINE_WIDTH = 10  # 中心線寬度 (像素)
+CENTER_LINE_WIDTH = 15  # 中心線寬度 (像素)
 CENTER_DETECTION_COOLDOWN = 0.5  # 中心點偵測冷卻時間 (秒)
 MAX_NET_SPEEDS = 30  # 紀錄的最大網中心速度數量
 NET_CROSSING_DIRECTION = 'left_to_right'  # 'left_to_right' or 'right_to_left' or 'both'
