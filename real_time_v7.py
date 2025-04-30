@@ -21,9 +21,9 @@ DEFAULT_TABLE_LENGTH_CM = 100  # 乒乓球桌長度，單位 cm
 
 # 偵測相關參數
 DEFAULT_DETECTION_TIMEOUT = 0.15  # 球體偵測超時，超過此時間將重置軌跡
-DEFAULT_ROI_START_RATIO = 0.4  # ROI 區域開始比例 (左側)
-DEFAULT_ROI_END_RATIO = 0.6  # ROI 區域結束比例 (右側)
-DEFAULT_ROI_BOTTOM_RATIO = 0.8  # ROI 區域底部比例 (排除底部 20%)
+DEFAULT_ROI_START_RATIO = 0.3  # ROI 區域開始比例 (左側)
+DEFAULT_ROI_END_RATIO = 0.7  # ROI 區域結束比例 (右側)
+DEFAULT_ROI_BOTTOM_RATIO = 0.9  # ROI 區域底部比例 (排除底部 20%)
 MAX_TRAJECTORY_POINTS = 80  # 最大軌跡點數
 
 # 新增: 中心線偵測參數
@@ -35,14 +35,14 @@ AUTO_STOP_AFTER_COLLECTION = False  # 修改：不要自動停止程序
 OUTPUT_FOLDER = 'real_time_output'  # 輸出資料夾名稱
 
 # FMO (Fast Moving Object) 相關參數
-MAX_PREV_FRAMES = 7  # 保留前幾幀的最大數量
-OPENING_KERNEL_SIZE = (1, 1)  # 開運算內核大小
-CLOSING_KERNEL_SIZE = (9, 9)  # 閉運算內核大小
-THRESHOLD_VALUE = 8  # 二值化閾值
+MAX_PREV_FRAMES = 4  # 保留前幾幀的最大數量
+OPENING_KERNEL_SIZE = (0, 0)  # 開運算內核大小
+CLOSING_KERNEL_SIZE = (11, 11)  # 閉運算內核大小
+THRESHOLD_VALUE = 12  # 二值化閾值
 
 # 球體偵測參數
-MIN_BALL_AREA = 10  # 最小球體面積
-MAX_BALL_AREA = 1700  # 最大球體面積
+MIN_BALL_AREA = 15  # 最小球體面積
+MAX_BALL_AREA = 5000  # 最大球體面積
 
 # 速度計算參數
 SPEED_SMOOTHING = 0.5  # 速度平滑因子

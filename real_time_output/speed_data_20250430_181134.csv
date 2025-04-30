@@ -1,0 +1,15 @@
+Count,Speed(km/h)
+1,4.6
+2,4.8
+3,5.4
+4,9.1
+5,2.3
+6,2.6
+7,7.2
+8,6.1
+9,1.6
+
+Statistics,
+Average,4.9
+Maximum,9.1
+Minimum,1.6
