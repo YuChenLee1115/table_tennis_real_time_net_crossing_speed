@@ -14,7 +14,7 @@ import csv
 # —— 全局參數設定 ——
 # 基本設定
 DEFAULT_CAMERA_INDEX = 0  # 預設相機索引
-DEFAULT_TARGET_FPS = 60  # 預設目標 FPS
+DEFAULT_TARGET_FPS = 120  # 預設目標 FPS
 DEFAULT_FRAME_WIDTH = 1920  # 預設影像寬度
 DEFAULT_FRAME_HEIGHT = 1080  # 預設影像高度
 DEFAULT_TABLE_LENGTH_CM = 200  # 乒乓球桌長度，單位 cm
