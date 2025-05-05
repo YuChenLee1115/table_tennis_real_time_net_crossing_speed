@@ -17,39 +17,40 @@ DEFAULT_CAMERA_INDEX = 0  # 預設相機索引
 DEFAULT_TARGET_FPS = 120  # 預設目標 FPS
 DEFAULT_FRAME_WIDTH = 1920  # 預設影像寬度
 DEFAULT_FRAME_HEIGHT = 1080  # 預設影像高度
-DEFAULT_TABLE_LENGTH_CM = 120  # 乒乓球桌長度，單位 cm
+DEFAULT_TABLE_LENGTH_CM = 140  # 乒乓球桌長度，單位 cm
 
 # 偵測相關參數
-DEFAULT_DETECTION_TIMEOUT = 0.1  # 球體偵測超時，超過此時間將重置軌跡
+DEFAULT_DETECTION_TIMEOUT = 0.05  # 球體偵測超時，超過此時間將重置軌跡
 DEFAULT_ROI_START_RATIO = 0.4  # ROI 區域開始比例 (左側)
 DEFAULT_ROI_END_RATIO = 0.6  # ROI 區域結束比例 (右側)
-DEFAULT_ROI_BOTTOM_RATIO = 0.9  # ROI 區域底部比例 (排除底部 10%)
-MAX_TRAJECTORY_POINTS = 80  # 最大軌跡點數
+DEFAULT_ROI_BOTTOM_RATIO = 0.7  # ROI 區域底部比例 (排除底部 10%)
+# GUIDE_LINE = 0.38
+MAX_TRAJECTORY_POINTS = 70  # 最大軌跡點數
 
 # 新增: 中心線偵測參數
 CENTER_LINE_WIDTH = 10  # 中心線寬度 (像素)
 CENTER_DETECTION_COOLDOWN = 0.5  # 中心點偵測冷卻時間 (秒)
-MAX_NET_SPEEDS = 30  # 紀錄的最大網中心速度數量
+MAX_NET_SPEEDS = 10  # 紀錄的最大網中心速度數量
 NET_CROSSING_DIRECTION = 'left_to_right'  # 'left_to_right' or 'right_to_left' or 'both'
 AUTO_STOP_AFTER_COLLECTION = False  # 修改：不要自動停止程序
 OUTPUT_FOLDER = 'real_time_output'  # 輸出資料夾名稱
 
 # FMO (Fast Moving Object) 相關參數
-MAX_PREV_FRAMES = 3  # 保留前幾幀的最大數量
+MAX_PREV_FRAMES = 5  # 保留前幾幀的最大數量
 OPENING_KERNEL_SIZE = (0, 0)  # 開運算內核大小
-CLOSING_KERNEL_SIZE = (25, 25)  # 閉運算內核大小
-THRESHOLD_VALUE = 3  # 二值化閾值
+CLOSING_KERNEL_SIZE = (30, 30)  # 閉運算內核大小
+THRESHOLD_VALUE = 2  # 二值化閾值
 
 # 球體偵測參數
 MIN_BALL_AREA = 8  # 最小球體面積
 MAX_BALL_AREA = 7000  # 最大球體面積
 
 # 速度計算參數
-SPEED_SMOOTHING = 0.3  # 速度平滑因子
+SPEED_SMOOTHING = 0.5  # 速度平滑因子
 KMH_CONVERSION = 0.036  # 轉換為公里/小時的係數
 
 # FPS 計算參數
-FPS_SMOOTHING = 0.3  # FPS 平滑因子
+FPS_SMOOTHING = 0.4  # FPS 平滑因子
 MAX_FRAME_TIMES = 20  # FPS 計算用的最大時間樣本數
 
 # 視覺化參數
@@ -93,6 +94,8 @@ class PingPongSpeedTracker:
         self.roi_start_x = int(self.frame_width * DEFAULT_ROI_START_RATIO)
         self.roi_end_x = int(self.frame_width * DEFAULT_ROI_END_RATIO)
         self.roi_end_y = int(self.frame_height * DEFAULT_ROI_BOTTOM_RATIO)
+        
+        # self.guide_line = int(self.frame_width * GUIDE_LINE)
         
         # 初始化軌跡與速度追蹤
         self.trajectory = deque(maxlen=MAX_TRAJECTORY_POINTS)
@@ -443,6 +446,8 @@ class PingPongSpeedTracker:
         cv2.line(frame, (self.roi_start_x, 0), (self.roi_start_x, self.frame_height), ROI_COLOR, 2)
         cv2.line(frame, (self.roi_end_x, 0), (self.roi_end_x, self.frame_height), ROI_COLOR, 2)
         cv2.line(frame, (0, self.roi_end_y), (self.frame_width, self.roi_end_y), ROI_COLOR, 2)
+        
+        # cv2.line(frame, (self.guide_line, 0), (self.guide_line, self.frame_height), ROI_COLOR, 2)
 
         # 繪製中心線
         cv2.line(frame, (self.center_x, 0), (self.center_x, self.frame_height), CENTER_LINE_COLOR, 2)

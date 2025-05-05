@@ -1,0 +1,18 @@
+Table Tennis Net Speed Record (km/h) - Session 1
+----------------------------------
+1: 12.6 km/h
+2: 5.6 km/h
+3: 9.3 km/h
+4: 17.0 km/h
+5: 12.7 km/h
+6: 10.0 km/h
+7: 13.1 km/h
+8: 10.1 km/h
+9: 16.6 km/h
+10: 17.7 km/h
+11: 8.8 km/h
+
+----------------------------------
+Average: 12.1 km/h
+Maximum: 17.7 km/h
+Minimum: 5.6 km/h
