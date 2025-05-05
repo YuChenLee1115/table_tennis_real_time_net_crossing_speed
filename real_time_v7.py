@@ -23,20 +23,20 @@ DEFAULT_TABLE_LENGTH_CM = 142  # 乒乓球桌長度，單位 cm
 DEFAULT_DETECTION_TIMEOUT = 0.05  # 球體偵測超時，超過此時間將重置軌跡
 DEFAULT_ROI_START_RATIO = 0.4  # ROI 區域開始比例 (左側)
 DEFAULT_ROI_END_RATIO = 0.6  # ROI 區域結束比例 (右側)
-DEFAULT_ROI_BOTTOM_RATIO = 0.7  # ROI 區域底部比例 (排除底部 10%)
+DEFAULT_ROI_BOTTOM_RATIO = 0.8  # ROI 區域底部比例 (排除底部 10%)
 # GUIDE_LINE = 0.38
-MAX_TRAJECTORY_POINTS = 70  # 最大軌跡點數
+MAX_TRAJECTORY_POINTS = 80  # 最大軌跡點數
 
 # 新增: 中心線偵測參數
 CENTER_LINE_WIDTH = 10  # 中心線寬度 (像素)
 CENTER_DETECTION_COOLDOWN = 0.5  # 中心點偵測冷卻時間 (秒)
-MAX_NET_SPEEDS = 10  # 紀錄的最大網中心速度數量
+MAX_NET_SPEEDS = 100  # 紀錄的最大網中心速度數量
 NET_CROSSING_DIRECTION = 'left_to_right'  # 'left_to_right' or 'right_to_left' or 'both'
 AUTO_STOP_AFTER_COLLECTION = False  # 修改：不要自動停止程序
 OUTPUT_FOLDER = 'real_time_output'  # 輸出資料夾名稱
 
 # FMO (Fast Moving Object) 相關參數
-MAX_PREV_FRAMES = 5  # 保留前幾幀的最大數量
+MAX_PREV_FRAMES = 8  # 保留前幾幀的最大數量
 OPENING_KERNEL_SIZE = (0, 0)  # 開運算內核大小
 CLOSING_KERNEL_SIZE = (30, 30)  # 閉運算內核大小
 THRESHOLD_VALUE = 2  # 二值化閾值
