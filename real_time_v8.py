@@ -1,5 +1,7 @@
 #!/usr/bin/env python3
-# 新增按空白鍵開始計數功能，收集完數據後不自動關閉
+# 乒乓球速度追蹤系統 v8
+# 新功能：時間索引化、多球干擾處理、避免記錄遺漏、折線圖優化、透視校正
+
 import cv2
 import numpy as np
 import time
@@ -17,39 +19,44 @@ DEFAULT_CAMERA_INDEX = 0  # 預設相機索引
 DEFAULT_TARGET_FPS = 120  # 預設目標 FPS
 DEFAULT_FRAME_WIDTH = 1920  # 預設影像寬度
 DEFAULT_FRAME_HEIGHT = 1080  # 預設影像高度
-DEFAULT_TABLE_LENGTH_CM = 120  # 乒乓球桌長度，單位 cm
+DEFAULT_TABLE_LENGTH_CM = 142  # 乒乓球桌長度，單位 cm
 
 # 偵測相關參數
-DEFAULT_DETECTION_TIMEOUT = 0.08  # 球體偵測超時，超過此時間將重置軌跡
+DEFAULT_DETECTION_TIMEOUT = 0.05  # 球體偵測超時，超過此時間將重置軌跡
 DEFAULT_ROI_START_RATIO = 0.4  # ROI 區域開始比例 (左側)
 DEFAULT_ROI_END_RATIO = 0.6  # ROI 區域結束比例 (右側)
-DEFAULT_ROI_BOTTOM_RATIO = 0.9  # ROI 區域底部比例 (排除底部 20%)
+DEFAULT_ROI_BOTTOM_RATIO = 0.8  # ROI 區域底部比例 (排除底部 10%)
 MAX_TRAJECTORY_POINTS = 80  # 最大軌跡點數
 
 # 新增: 中心線偵測參數
-CENTER_LINE_WIDTH = 15  # 中心線寬度 (像素)
-CENTER_DETECTION_COOLDOWN = 0.5  # 中心點偵測冷卻時間 (秒)
-MAX_NET_SPEEDS = 30  # 紀錄的最大網中心速度數量
+CENTER_LINE_WIDTH = 20  # 中心線寬度 (像素)，從10增加到20以增加檢測機會
+CENTER_DETECTION_COOLDOWN = 0.2  # 中心點偵測冷卻時間 (秒)，從0.5降低到0.2提高靈敏度
+MAX_NET_SPEEDS = 100  # 紀錄的最大網中心速度數量
 NET_CROSSING_DIRECTION = 'left_to_right'  # 'left_to_right' or 'right_to_left' or 'both'
 AUTO_STOP_AFTER_COLLECTION = False  # 修改：不要自動停止程序
 OUTPUT_FOLDER = 'real_time_output'  # 輸出資料夾名稱
 
+# 新增: 透視校正參數
+NEAR_SIDE_WIDTH_CM = 29  # 較近側的實際寬度（公分）
+FAR_SIDE_WIDTH_CM = 72   # 較遠側的實際寬度（公分）
+
 # FMO (Fast Moving Object) 相關參數
-MAX_PREV_FRAMES = 3  # 保留前幾幀的最大數量
-OPENING_KERNEL_SIZE = (0, 0)  # 開運算內核大小
-CLOSING_KERNEL_SIZE = (20, 20)  # 閉運算內核大小
-THRESHOLD_VALUE = 4  # 二值化閾值
+MAX_PREV_FRAMES = 8  # 保留前幾幀的最大數量
+OPENING_KERNEL_SIZE = (2, 2)  # 開運算內核大小
+CLOSING_KERNEL_SIZE = (30, 30)  # 閉運算內核大小
+THRESHOLD_VALUE = 8  # 二值化閾值
 
 # 球體偵測參數
 MIN_BALL_AREA = 10  # 最小球體面積
-MAX_BALL_AREA = 6000  # 最大球體面積
+MAX_BALL_AREA = 7000  # 最大球體面積
+MIN_CIRCULARITY = 0.5  # 最小圓度閾值，用於多球情況的過濾
 
 # 速度計算參數
-SPEED_SMOOTHING = 0.3  # 速度平滑因子
+SPEED_SMOOTHING = 0.5  # 速度平滑因子
 KMH_CONVERSION = 0.036  # 轉換為公里/小時的係數
 
 # FPS 計算參數
-FPS_SMOOTHING = 0.3  # FPS 平滑因子
+FPS_SMOOTHING = 0.4  # FPS 平滑因子
 MAX_FRAME_TIMES = 20  # FPS 計算用的最大時間樣本數
 
 # 視覺化參數
@@ -64,13 +71,17 @@ NET_SPEED_TEXT_COLOR = (255, 0, 0)  # 網中心速度文字顏色 (BGR)
 FONT_SCALE = 1  # 文字大小
 FONT_THICKNESS = 2  # 文字粗細
 
+# 調試參數
+DEBUG_MODE = False  # 是否啟用調試模式
+
 # —— 啟用最佳化與多線程 ——
 cv2.setUseOptimized(True)
 cv2.setNumThreads(10)
 
 class PingPongSpeedTracker:
     def __init__(self, video_source=DEFAULT_CAMERA_INDEX, table_length_cm=DEFAULT_TABLE_LENGTH_CM, 
-                 detection_timeout=DEFAULT_DETECTION_TIMEOUT, use_video_file=False, target_fps=DEFAULT_TARGET_FPS):
+                 detection_timeout=DEFAULT_DETECTION_TIMEOUT, use_video_file=False, target_fps=DEFAULT_TARGET_FPS,
+                 debug_mode=DEBUG_MODE):
         """
         初始化乒乓球速度追蹤器
         
@@ -80,7 +91,11 @@ class PingPongSpeedTracker:
             detection_timeout: 偵測超時時間 (秒)，超過此時間會重置軌跡
             use_video_file: 是否使用影片檔案作為輸入
             target_fps: 目標 FPS
+            debug_mode: 是否啟用調試模式
         """
+        # 設置調試模式
+        self.debug_mode = debug_mode
+        
         # 初始化視訊捕獲
         self.cap = cv2.VideoCapture(video_source)
         self.use_video_file = use_video_file
@@ -108,7 +123,7 @@ class PingPongSpeedTracker:
         self.frame_count = 0
         self.last_frame_time = time.time()
         
-        # 新增: 網中心速度追蹤
+        # 網中心速度追蹤
         self.center_x = self.frame_width // 2
         self.center_line_start = self.center_x - CENTER_LINE_WIDTH // 2
         self.center_line_end = self.center_x + CENTER_LINE_WIDTH // 2
@@ -120,9 +135,20 @@ class PingPongSpeedTracker:
         self.output_generated = False  # 是否已產生輸出結果
         self.should_exit = False  # 是否應該退出程序
         
-        # 新增: 控制計數開關的變量
+        # 控制計數開關的變量
         self.is_counting = False  # 初始狀態不計數
         self.count_session = 0  # 計數會話編號
+        
+        # 新增: 時間索引化相關變數
+        self.timing_started = False  # 是否已開始計時
+        self.first_ball_time = None  # 第一顆球的時間戳記
+        self.relative_times = []     # 存儲每顆球的相對時間
+        
+        # 新增: 透視校正相關參數
+        self.near_side_width_cm = NEAR_SIDE_WIDTH_CM  # 較近側的實際寬度（公分）
+        self.far_side_width_cm = FAR_SIDE_WIDTH_CM    # 較遠側的實際寬度（公分）
+        self.perspective_ratio = self.far_side_width_cm / self.near_side_width_cm  # 透視比例
+        self.roi_height = self.roi_end_y  # ROI區域高度，用於透視計算
     
     def _setup_capture(self, target_fps):
         """設置視訊捕獲的參數"""
@@ -214,7 +240,7 @@ class PingPongSpeedTracker:
 
     def detect_ball(self, roi, mask):
         """
-        在 ROI 區域中偵測乒乓球
+        在 ROI 區域中偵測乒乓球，支援多球情境處理
         
         Args:
             roi: ROI 區域圖像
@@ -226,9 +252,11 @@ class PingPongSpeedTracker:
         # 找出遮罩中的所有輪廓
         cnts, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
         
-        # 按面積大小排序輪廓（由大到小）
+        # 存儲所有可能的球體
+        potential_balls = []
+        
+        # 按面積大小排序輪廓
         for c in sorted(cnts, key=cv2.contourArea, reverse=True):
-            # 計算輪廓面積
             area = cv2.contourArea(c)
             
             # 根據面積過濾，保留可能是球的輪廓
@@ -238,27 +266,94 @@ class PingPongSpeedTracker:
                 if M["m00"] != 0:
                     cx = int(M["m10"] / M["m00"])
                     cy = int(M["m01"] / M["m00"])
-                    
-                    # 轉換回原始座標系
                     cx_orig = cx + self.roi_start_x
                     
-                    # 更新最後偵測時間
-                    self.last_detection_time = time.time()
+                    # 計算圓度（圓度接近1表示是較圓的物體，更可能是球）
+                    perimeter = cv2.arcLength(c, True)
+                    circularity = 4 * math.pi * area / (perimeter * perimeter) if perimeter > 0 else 0
                     
-                    # 根據輸入源選擇適當的時間戳
-                    ts = (self.frame_count / self.fps) if self.use_video_file else time.time()
-                    
-                    # 檢測是否經過中心線（只有當計數標誌開啟時才進行）
-                    if self.is_counting:
-                        self.check_center_crossing(cx_orig, ts)
-                    
-                    # 保存軌跡點
-                    self.trajectory.append((cx_orig, cy, ts))
-                    
-                    return (cx, cy), c
-                    
+                    # 添加到潛在球體列表
+                    potential_balls.append({
+                        'position': (cx, cy),
+                        'original_x': cx_orig,
+                        'contour': c,
+                        'area': area,
+                        'circularity': circularity
+                    })
+        
+        # 如果找到了潛在球體
+        if potential_balls:
+            # 應用多條件過濾，選擇最可能的球體
+            best_ball = self._select_best_ball(potential_balls)
+            if best_ball:
+                cx, cy = best_ball['position']
+                cx_orig = best_ball['original_x']
+                
+                # 更新最後偵測時間
+                self.last_detection_time = time.time()
+                
+                # 根據輸入源選擇適當的時間戳
+                ts = (self.frame_count / self.fps) if self.use_video_file else time.time()
+                
+                # 檢測是否經過中心線（只有當計數標誌開啟時才進行）
+                if self.is_counting:
+                    self.check_center_crossing(cx_orig, ts)
+                
+                # 保存軌跡點
+                self.trajectory.append((cx_orig, cy, ts))
+                
+                if self.debug_mode:
+                    print(f"偵測到球：位置({cx_orig}, {cy})，面積:{best_ball['area']:.1f}，圓度:{best_ball['circularity']:.3f}")
+                
+                return (cx, cy), best_ball['contour']
+        
         # 未偵測到合適的球體
         return None, None
+    
+    def _select_best_ball(self, potential_balls):
+        """
+        基於多條件選擇最佳球體
+        
+        Args:
+            potential_balls: 潛在球體列表，每個球體為包含位置、輪廓等資訊的字典
+            
+        Returns:
+            dict: 最佳球體資訊或 None
+        """
+        if not potential_balls:
+            return None
+            
+        # 如果軌跡為空，選擇最圓的球體作為起始點
+        if len(self.trajectory) == 0:
+            best_ball = max(potential_balls, key=lambda ball: ball['circularity'])
+            if best_ball['circularity'] > MIN_CIRCULARITY:
+                return best_ball
+            return potential_balls[0]  # 如果沒有夠圓的，返回第一個
+        
+        # 獲取最近一個軌跡點
+        last_x, last_y, _ = self.trajectory[-1]
+        
+        # 計算每個潛在球體與最後軌跡點的距離
+        for ball in potential_balls:
+            x, y = ball['position']
+            orig_x = ball['original_x']
+            # 計算與最後軌跡點的距離
+            ball['distance'] = math.hypot(orig_x - last_x, y - last_y)
+            
+            # 如果距離太遠，可能是不相關的球
+            if ball['distance'] > self.frame_width * 0.2:  # 超過畫面寬度的20%視為太遠
+                ball['distance'] = float('inf')  # 設為無限大表示不可能是同一個球
+        
+        # 根據距離排序
+        potential_balls.sort(key=lambda ball: ball['distance'])
+        
+        # 返回距離最近且圓度合理的球體
+        for ball in potential_balls:
+            if ball['circularity'] > MIN_CIRCULARITY:  # 圓度閾值
+                return ball
+        
+        # 如果沒有滿足條件的，返回距離最近的
+        return potential_balls[0] if potential_balls else None
 
     def toggle_counting(self):
         """切換計數狀態"""
@@ -266,6 +361,9 @@ class PingPongSpeedTracker:
             # 開始計數
             self.is_counting = True
             self.net_speeds = []  # 清空速度列表
+            self.relative_times = []  # 清空相對時間列表
+            self.timing_started = False  # 重置時間標記
+            self.first_ball_time = None  # 重置第一球時間
             self.output_generated = False  # 重置輸出狀態
             self.count_session += 1  # 增加會話編號
             print(f"開始計數 (會話 #{self.count_session}) - 目標收集 {MAX_NET_SPEEDS} 個速度值")
@@ -281,7 +379,7 @@ class PingPongSpeedTracker:
 
     def check_center_crossing(self, ball_x, timestamp):
         """
-        檢查球是否經過中心線
+        檢查球是否經過中心線，並記錄相對時間和速度
         
         Args:
             ball_x: 球的 x 座標
@@ -303,29 +401,51 @@ class PingPongSpeedTracker:
         # 判斷移動方向
         moving_left_to_right = ball_x > self.last_ball_x
         moving_right_to_left = ball_x < self.last_ball_x
+        direction = ball_x - self.last_ball_x
         
         # 判斷是否穿過中心線
         crossed_left_to_right = (self.last_ball_x < self.center_line_end and ball_x >= self.center_line_end)
         crossed_right_to_left = (self.last_ball_x > self.center_line_start and ball_x <= self.center_line_start)
         
+        # 預測是否將穿過中心線（增強檢測能力）
+        will_cross = False
+        if len(self.trajectory) >= 2:
+            # 根據當前運動方向預測下一個位置
+            next_x = ball_x + direction
+            
+            # 檢查是否會穿過中心線
+            if (self.last_ball_x < self.center_x and next_x >= self.center_x) or \
+               (self.last_ball_x > self.center_x and next_x <= self.center_x):
+                will_cross = True
+        
         # 根據設定的方向過濾
         record_crossing = False
         
-        if NET_CROSSING_DIRECTION == 'left_to_right' and crossed_left_to_right:
+        if NET_CROSSING_DIRECTION == 'left_to_right' and (crossed_left_to_right or (will_cross and direction > 0)):
             record_crossing = True
-        elif NET_CROSSING_DIRECTION == 'right_to_left' and crossed_right_to_left:
+        elif NET_CROSSING_DIRECTION == 'right_to_left' and (crossed_right_to_left or (will_cross and direction < 0)):
             record_crossing = True
-        elif NET_CROSSING_DIRECTION == 'both' and (crossed_left_to_right or crossed_right_to_left):
+        elif NET_CROSSING_DIRECTION == 'both' and (crossed_left_to_right or crossed_right_to_left or will_cross):
             record_crossing = True
             
-        # 只有在計數狀態下且符合穿越條件時才記錄速度
+        # 如果符合穿越條件，記錄速度
         if record_crossing and self.ball_speed > 0:
+            # 處理相對時間
+            if not self.timing_started:
+                self.timing_started = True
+                self.first_ball_time = timestamp
+                relative_time = 0.0
+            else:
+                relative_time = round(timestamp - self.first_ball_time, 2)  # 精確到小數點後兩位
+            
+            # 記錄資料
             self.crossed_center = True
             self.last_net_speed = self.ball_speed
             self.net_speeds.append(self.ball_speed)
+            self.relative_times.append(relative_time)
             self.last_net_detection_time = timestamp
             
-            print(f"記錄速度 #{len(self.net_speeds)}: {self.ball_speed:.1f} km/h")
+            print(f"記錄速度 #{len(self.net_speeds)}: {self.ball_speed:.1f} km/h, 時間: {relative_time}秒")
             
             # 如果達到目標次數，生成輸出並停止計數
             if len(self.net_speeds) >= MAX_NET_SPEEDS and not self.output_generated:
@@ -338,21 +458,22 @@ class PingPongSpeedTracker:
         self.last_ball_x = ball_x
 
     def calculate_speed(self):
-        """計算球體速度（公里/小時）"""
+        """計算球體速度（公里/小時），使用透視校正"""
         if len(self.trajectory) < 2:
             return
             
         # 取最近兩個軌跡點
         p1, p2 = self.trajectory[-2], self.trajectory[-1]
         
-        # 計算像素距離
-        dp = math.hypot(p2[0] - p1[0], p2[1] - p1[1])
+        # 提取座標和時間
+        x1, y1, t1 = p1
+        x2, y2, t2 = p2
         
-        # 轉換為實際距離（厘米）
-        dist_cm = dp / self.pixels_per_cm
+        # 使用透視校正計算實際距離
+        dist_cm = self._calculate_real_distance(x1, y1, x2, y2)
         
         # 計算時間差
-        dt = p2[2] - p1[2]
+        dt = t2 - t1
         
         if dt > 0:
             # 計算速度（公里/小時）
@@ -363,6 +484,58 @@ class PingPongSpeedTracker:
                 self.ball_speed = (1 - SPEED_SMOOTHING) * self.ball_speed + SPEED_SMOOTHING * speed
             else:
                 self.ball_speed = speed
+            
+            if self.debug_mode:
+                print(f"速度計算: 距離={dist_cm:.2f}cm, 時間={dt:.4f}s, 速度={speed:.1f}km/h, 平滑後={self.ball_speed:.1f}km/h")
+
+    def _calculate_real_distance(self, x1, y1, x2, y2):
+        """
+        根據透視校正計算實際距離
+        
+        Args:
+            x1, y1: 第一個點的座標
+            x2, y2: 第二個點的座標
+            
+        Returns:
+            float: 實際距離（公分）
+        """
+        # 計算兩點的像素距離
+        pixel_distance = math.hypot(x2 - x1, y2 - y1)
+        
+        # 根據 y 座標（代表深度）計算每個點的像素-公分轉換比例
+        ratio1 = self._get_pixel_to_cm_ratio(y1)
+        ratio2 = self._get_pixel_to_cm_ratio(y2)
+        
+        # 使用兩點的平均比例轉換像素距離為實際距離
+        avg_ratio = (ratio1 + ratio2) / 2
+        real_distance_cm = pixel_distance * avg_ratio
+        
+        if self.debug_mode:
+            print(f"透視校正: 像素距離={pixel_distance:.1f}, 轉換比例1={ratio1:.4f}, 比例2={ratio2:.4f}, 實際距離={real_distance_cm:.2f}cm")
+        
+        return real_distance_cm
+    
+    def _get_pixel_to_cm_ratio(self, y):
+        """
+        根據 y 座標計算像素到公分的轉換比例
+        
+        Args:
+            y: 點的 y 座標
+            
+        Returns:
+            float: 像素到公分的轉換比例
+        """
+        # 計算相對位置（0為頂部/遠端，1為底部/近端）
+        relative_y = min(1, max(0, y / self.roi_height))
+        
+        # 線性插值計算轉換比例
+        near_ratio = self.table_length_cm / self.frame_width * (self.near_side_width_cm / self.table_length_cm)
+        far_ratio = self.table_length_cm / self.frame_width * (self.far_side_width_cm / self.table_length_cm)
+        
+        # 反向插值：relative_y 為 1 時使用 near_ratio，為 0 時使用 far_ratio
+        pixel_to_cm_ratio = near_ratio * relative_y + far_ratio * (1 - relative_y)
+        
+        return pixel_to_cm_ratio
 
     def generate_outputs(self):
         """生成速度數據的輸出：折線圖、TXT和CSV文件，含時間戳記"""
@@ -380,24 +553,34 @@ class PingPongSpeedTracker:
         if not os.path.exists(OUTPUT_FOLDER):
             os.makedirs(OUTPUT_FOLDER)
             
+        # 建立包含起始點的圖表資料
+        plot_times = [0.0] + self.relative_times
+        plot_speeds = [0.0] + self.net_speeds
+        
         # 生成並保存折線圖
         plt.figure(figsize=(10, 6))
-        plt.plot(range(1, len(self.net_speeds) + 1), self.net_speeds, marker='o', linestyle='-')
+        plt.plot(plot_times, plot_speeds, marker='o', linestyle='-')
+        
+        # 在每個點上標註數值
+        for i, (t, s) in enumerate(zip(plot_times, plot_speeds)):
+            plt.annotate(f"{s:.1f}", (t, s), textcoords="offset points", 
+                        xytext=(0, 10), ha='center')
+        
         plt.title(f'Table Tennis Net Speed Record (Session {self.count_session})')
-        plt.xlabel('Count')
+        plt.xlabel('Time (s)')
         plt.ylabel('Speed (km/h)')
         plt.grid(True)
         chart_filename = f'{OUTPUT_FOLDER}/speed_chart_{timestamp}.png'
         plt.savefig(chart_filename)
         plt.close()
         
-        # 將速度數據保存到TXT檔案
+        # 將速度數據保存到TXT檔案 (不包含初始零點)
         txt_filename = f'{OUTPUT_FOLDER}/speed_data_{timestamp}.txt'
         with open(txt_filename, 'w') as f:
             f.write(f"Table Tennis Net Speed Record (km/h) - Session {self.count_session}\n")
             f.write("----------------------------------\n")
-            for i, speed in enumerate(self.net_speeds, 1):
-                f.write(f"{i}: {speed:.1f} km/h\n")
+            for i, (speed, rel_time) in enumerate(zip(self.net_speeds, self.relative_times), 1):
+                f.write(f"{rel_time}s: {speed:.1f} km/h\n")
             
             # 添加統計資訊
             avg_speed = sum(self.net_speeds) / len(self.net_speeds)
@@ -408,15 +591,15 @@ class PingPongSpeedTracker:
             f.write(f"Maximum: {max_speed:.1f} km/h\n")
             f.write(f"Minimum: {min_speed:.1f} km/h\n")
         
-        # 將速度數據保存到CSV檔案
+        # 將速度數據保存到CSV檔案 (不包含初始零點)
         csv_filename = f'{OUTPUT_FOLDER}/speed_data_{timestamp}.csv'
         with open(csv_filename, 'w', newline='') as f:
             csv_writer = csv.writer(f)
             # 寫入標題行
-            csv_writer.writerow(["Count", "Speed(km/h)"])
+            csv_writer.writerow(["Time(s)", "Speed(km/h)"])
             # 寫入數據
-            for i, speed in enumerate(self.net_speeds, 1):
-                csv_writer.writerow([i, f"{speed:.1f}"])
+            for i, (speed, rel_time) in enumerate(zip(self.net_speeds, self.relative_times), 1):
+                csv_writer.writerow([f"{rel_time:.2f}", f"{speed:.1f}"])
             # 寫入統計資訊
             csv_writer.writerow([])
             csv_writer.writerow(["Statistics", ""])
@@ -513,6 +696,18 @@ class PingPongSpeedTracker:
             FONT_THICKNESS
         )
         
+        # —— 顯示最後記錄時間 ——
+        if self.timing_started and len(self.relative_times) > 0:
+            cv2.putText(
+                frame,
+                f"Last Time: {self.relative_times[-1]:.2f}s",
+                (10, 230),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                FONT_SCALE,
+                NET_SPEED_TEXT_COLOR,
+                FONT_THICKNESS
+            )
+        
         # —— 顯示指導訊息 ——
         cv2.putText(
             frame,
@@ -533,9 +728,10 @@ class PingPongSpeedTracker:
 
     def run(self):
         """執行主循環"""
-        print("=== 乒乓球速度追蹤器 v7 ===")
+        print("=== 乒乓球速度追蹤器 v8 ===")
         print("按下空白鍵開始/停止計數")
         print("按下 'q' 或 ESC 鍵退出程序")
+        print(f"使用透視校正: 近端寬度 {self.near_side_width_cm}cm, 遠端寬度 {self.far_side_width_cm}cm")
         
         while True:
             # 如果應該退出，則跳出循環
@@ -588,6 +784,9 @@ class PingPongSpeedTracker:
             # 按鍵處理
             if key == ord(' '):  # 空白鍵，切換計數狀態
                 self.toggle_counting()
+            elif key == ord('d'):  # 'd' 鍵，切換調試模式
+                self.debug_mode = not self.debug_mode
+                print(f"調試模式: {'開啟' if self.debug_mode else '關閉'}")
             elif key in (ord('q'), 27):  # 'q' 或 ESC 鍵退出
                 # 如果用戶手動退出但尚未輸出結果，仍然生成輸出
                 if self.is_counting and len(self.net_speeds) > 0 and not self.output_generated:
@@ -620,11 +819,15 @@ def main():
                         help='記錄球經過網中心的方向')
     parser.add_argument('--count', type=int, default=MAX_NET_SPEEDS,
                         help='需要收集的速度數據數量')
+    parser.add_argument('--debug', action='store_true', help='啟用調試模式')
+    parser.add_argument('--near_width', type=int, default=NEAR_SIDE_WIDTH_CM,
+                        help='ROI 較近側的實際寬度 (cm)')
+    parser.add_argument('--far_width', type=int, default=FAR_SIDE_WIDTH_CM,
+                        help='ROI 較遠側的實際寬度 (cm)')
     args = parser.parse_args()
 
-    # 設置全局穿越方向
+    # 設置全局穿越方向和參數
     NET_CROSSING_DIRECTION = args.direction
-    # 設置收集數量
     MAX_NET_SPEEDS = args.count
 
     # 根據命令列參數初始化追蹤器
@@ -633,7 +836,8 @@ def main():
             args.video, 
             table_length_cm=args.table_length,
             detection_timeout=args.timeout,
-            use_video_file=True
+            use_video_file=True,
+            debug_mode=args.debug
         )
     else:
         tracker = PingPongSpeedTracker(
@@ -641,8 +845,14 @@ def main():
             table_length_cm=args.table_length,
             detection_timeout=args.timeout,
             use_video_file=False, 
-            target_fps=args.fps
+            target_fps=args.fps,
+            debug_mode=args.debug
         )
+    
+    # 設置透視校正參數
+    tracker.near_side_width_cm = args.near_width
+    tracker.far_side_width_cm = args.far_width
+    tracker.perspective_ratio = tracker.far_side_width_cm / tracker.near_side_width_cm
         
     # 啟動追蹤器
     tracker.run()
