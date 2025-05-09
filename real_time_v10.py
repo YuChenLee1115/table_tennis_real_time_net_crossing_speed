@@ -829,7 +829,7 @@ class PingPongSpeedTracker:
         print(f"生成輸出結果: {len(self.net_speeds)} 個速度值")
         
         # 創建輸出目錄位置
-        output_dir = f"{OUTPUT_FOLDER}/session_{self.count_session}_{timestamp}"
+        output_dir = f"{OUTPUT_FOLDER}/{timestamp}"
         os.makedirs(output_dir, exist_ok=True)
         
         # 直接在主執行緒中生成圖表
