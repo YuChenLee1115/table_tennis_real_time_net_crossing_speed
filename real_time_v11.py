@@ -703,7 +703,7 @@ class PingPongSpeedTracker:
         plt.axhline(y=avg_speed, color='r', linestyle='--', label=f'Avg: {avg_speed:.1f} km/h')
         for t, s in zip(relative_times, net_speeds):
             plt.annotate(f"{s:.1f}", (t, s), textcoords="offset points", xytext=(0,10), ha='center', fontsize=8)
-        plt.title(f'Net Crossing Speeds (Session {session_id}) - {timestamp_str}', fontsize=16)
+        plt.title(f'Net Crossing Speeds - {timestamp_str}', fontsize=16)
         plt.xlabel('Relative Time (s)', fontsize=12)
         plt.ylabel('Speed (km/h)', fontsize=12)
         plt.grid(True, linestyle=':', alpha=0.7)
@@ -724,7 +724,7 @@ class PingPongSpeedTracker:
             f.write(f"Net Speeds - Session {session_id} - {timestamp_str}\n")
             f.write("---------------------------------------\n")
             for i, (t, s) in enumerate(zip(relative_times, net_speeds)):
-                f.write(f"Point {i+1}: Time {t:.2f}s, Speed {s:.1f} km/h\n")
+                f.write(f"{t:.2f}s: {s:.1f} km/h\n")
             f.write("---------------------------------------\n")
             f.write(f"Total Points: {len(net_speeds)}\n")
             f.write(f"Average Speed: {avg_speed:.1f} km/h\n")
@@ -735,9 +735,9 @@ class PingPongSpeedTracker:
         csv_filename = f'{output_dir_path}/speed_data_{timestamp_str}.csv'
         with open(csv_filename, 'w', newline='') as f:
             writer = csv.writer(f)
-            writer.writerow(['Session ID', 'Timestamp', 'Point Number', 'Relative Time (s)', 'Speed (km/h)'])
+            writer.writerow(['Timestamp', 'Point Number', 'Relative Time (s)', 'Speed (km/h)'])
             for i, (t, s) in enumerate(zip(relative_times, net_speeds)):
-                writer.writerow([session_id, timestamp_str, i+1, f"{t:.2f}", f"{s:.1f}"])
+                writer.writerow([timestamp_str, i+1, f"{t:.2f}", f"{s:.1f}"])
             writer.writerow([])
             writer.writerow(['Statistic', 'Value'])
             writer.writerow(['Total Points', len(net_speeds)])
