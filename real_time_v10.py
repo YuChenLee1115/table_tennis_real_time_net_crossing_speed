@@ -9,6 +9,8 @@ import datetime
 from collections import deque
 import math
 import argparse
+import matplotlib
+matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import os
 import csv
@@ -34,7 +36,7 @@ MAX_TRAJECTORY_POINTS = 80  # 最大軌跡點數
 # 中心線偵測參數
 CENTER_LINE_WIDTH = 20  # 中心線寬度 (像素)
 CENTER_DETECTION_COOLDOWN = 0.15  # 中心點偵測冷卻時間 (秒)，從0.2降低到0.15提高靈敏度
-MAX_NET_SPEEDS = 100  # 紀錄的最大網中心速度數量
+MAX_NET_SPEEDS = 27  # 紀錄的最大網中心速度數量
 NET_CROSSING_DIRECTION = 'left_to_right'  # 'left_to_right' or 'right_to_left' or 'both'
 AUTO_STOP_AFTER_COLLECTION = False  # 不自動停止程序
 OUTPUT_FOLDER = 'real_time_output'  # 輸出資料夾名稱
