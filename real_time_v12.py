@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
-# 乒乓球速度追蹤系統 v11 Enhanced (Refactored for Efficiency and macOS)
+# 乒乓球速度追蹤系統 v11.1 高級深度校正版
 # Lightweight, optimized, multi-threaded (acquisition & I/O), macOS compatible
-# 增強版：添加高精度四點透視校正技術
+# 增強版：添加高精度四點透視校正技術與非線性深度校正
 
 import cv2
 import numpy as np
@@ -46,6 +46,12 @@ OUTPUT_DATA_FOLDER = 'real_time_output'
 NEAR_SIDE_WIDTH_CM_DEFAULT = 29  # 圖中顯示的近端寬度
 FAR_SIDE_WIDTH_CM_DEFAULT = 72   # 圖中顯示的遠端寬度
 
+# 深度校正參數 - 新增
+DEPTH_CORRECTION_ENABLE = True   # 是否啟用深度校正
+DEPTH_CORRECTION_FACTOR = 3    # 深度校正因子（用於調整遠端測量值）
+DEPTH_CORRECTION_CURVE = 4.0     # 深度校正曲線（控制校正量的非線性程度）
+BALL_SIZE_CORRECTION_ENABLE = True  # 是否使用球體大小作為深度參考
+
 # FMO (Fast Moving Object) Parameters
 MAX_PREV_FRAMES_FMO = 5
 OPENING_KERNEL_SIZE_FMO = (10, 10)
@@ -56,6 +62,7 @@ THRESHOLD_VALUE_FMO = 10
 MIN_BALL_AREA_PX = 10
 MAX_BALL_AREA_PX = 7000
 MIN_BALL_CIRCULARITY = 0.5
+REFERENCE_BALL_AREA = 400  # 參考球體大小（像素面積）- 新增
 
 # Speed Calculation
 SPEED_SMOOTHING_FACTOR = 0.5
@@ -87,6 +94,7 @@ PREDICTION_LOOKAHEAD_FRAMES = 5
 # Debug
 DEBUG_MODE_DEFAULT = False
 DRAW_GRID_INTERVAL = 30  # 每30幀繪製一次透視網格
+SHOW_DEPTH_CORRECTION = True  # 顯示深度校正資訊
 
 # —— OpenCV Optimization ——
 cv2.setUseOptimized(True)
@@ -96,14 +104,18 @@ except AttributeError:
     cv2.setNumThreads(4)
 
 
-class PerspectiveCorrector:
-    """用於桌球場景的進階透視校正"""
+class AdvancedPerspectiveCorrector:
+    """用於桌球場景的進階透視校正，包含非線性深度校正"""
     
     def __init__(self, frame_width, frame_height, 
                  table_length_cm, near_width_cm, far_width_cm,
-                 roi_start_x, roi_end_x, roi_top_y, roi_bottom_y):
+                 roi_start_x, roi_end_x, roi_top_y, roi_bottom_y,
+                 depth_correction_factor=DEPTH_CORRECTION_FACTOR,
+                 depth_correction_curve=DEPTH_CORRECTION_CURVE,
+                 enable_depth_correction=DEPTH_CORRECTION_ENABLE,
+                 enable_ball_size_correction=BALL_SIZE_CORRECTION_ENABLE):
         """
-        初始化透視校正器
+        初始化進階透視校正器
         
         Args:
             frame_width, frame_height: 影像尺寸
@@ -111,6 +123,10 @@ class PerspectiveCorrector:
             near_width_cm: 近端寬度（公分）
             far_width_cm: 遠端寬度（公分）
             roi_*: ROI區域座標
+            depth_correction_factor: 深度校正係數
+            depth_correction_curve: 深度校正曲線指數
+            enable_depth_correction: 是否啟用深度校正
+            enable_ball_size_correction: 是否啟用球體大小校正
         """
         self.frame_width = frame_width
         self.frame_height = frame_height
@@ -123,6 +139,15 @@ class PerspectiveCorrector:
         self.roi_end_x = roi_end_x
         self.roi_top_y = roi_top_y
         self.roi_bottom_y = roi_bottom_y
+        
+        # 深度校正參數
+        self.depth_correction_factor = depth_correction_factor
+        self.depth_correction_curve = depth_correction_curve
+        self.enable_depth_correction = enable_depth_correction
+        self.enable_ball_size_correction = enable_ball_size_correction
+        
+        # 最後一次校正信息（用於調試）
+        self.last_correction_info = {}
         
         # 設置透視變換
         self.setup_homography()
@@ -194,14 +219,90 @@ class PerspectiveCorrector:
         # 返回像素座標 (px, py)
         return transformed[0][0][0], transformed[0][0][1]
     
-    def get_real_distance(self, px1, py1, px2, py2):
-        """計算兩點在實際空間中的距離（公分）"""
+    def calculate_depth_correction_factor(self, y_position, ball_area=None):
+        """
+        計算基於深度的校正因子
+        
+        Args:
+            y_position: 在畫面中的y座標（用於估計深度）
+            ball_area: 球體面積（可選，用於進一步提高精度）
+            
+        Returns:
+            float: 速度校正因子
+        """
+        # 如果未啟用深度校正，返回1.0（無校正）
+        if not self.enable_depth_correction:
+            return 1.0
+            
+        # 計算相對深度（0=遠端/頂部，1=近端/底部）
+        relative_depth = 0
+        if self.roi_bottom_y > self.roi_top_y:  # 避免除以零
+            relative_depth = (y_position - self.roi_top_y) / (self.roi_bottom_y - self.roi_top_y)
+            relative_depth = np.clip(relative_depth, 0.0, 1.0)
+        
+        # 反轉相對深度，使0表示近端（底部），1表示遠端（頂部）
+        depth_factor = 1.0 - relative_depth
+        
+        # 應用非線性曲線，使校正在遠端更強
+        # depth_factor值域是0到1，0是近端，1是遠端
+        # 通過冪運算使曲線變得非線性
+        depth_factor = pow(depth_factor, self.depth_correction_curve)
+        
+        # 根據深度因子計算最終校正因子
+        # 從1.0（底部/近端）到depth_correction_factor（頂部/遠端）的線性插值
+        correction = 1.0 + (self.depth_correction_factor - 1.0) * depth_factor
+        
+        # 球體大小校正（如果啟用且提供了球體面積）
+        if self.enable_ball_size_correction and ball_area is not None and ball_area > 0 and REFERENCE_BALL_AREA > 0:
+            # 球體大小比例（與參考大小比較）
+            size_ratio = math.sqrt(REFERENCE_BALL_AREA / ball_area)
+            # 限制比例在合理範圍內
+            size_ratio = np.clip(size_ratio, 0.5, 2.0)
+            # 混合深度校正和球體大小校正
+            correction = correction * 0.7 + size_ratio * 0.3
+        
+        # 保存最後的校正信息以便調試
+        self.last_correction_info = {
+            'y_position': y_position,
+            'relative_depth': relative_depth,
+            'depth_factor': depth_factor,
+            'ball_area': ball_area,
+            'correction': correction
+        }
+        
+        return correction
+    
+    def get_real_distance(self, px1, py1, px2, py2, ball_area=None):
+        """
+        計算兩點在實際空間中的距離（公分），包含深度校正
+        
+        Args:
+            px1, py1: 第一個點的像素座標
+            px2, py2: 第二個點的像素座標
+            ball_area: 球體面積（可選，用於球體大小校正）
+            
+        Returns:
+            float: 校正後的實際距離（公分）
+        """
         # 轉換兩點到實際座標
         real_x1, real_y1 = self.get_approximate_real_position(px1, py1)
         real_x2, real_y2 = self.get_approximate_real_position(px2, py2)
         
         # 計算歐氏距離
-        return np.sqrt((real_x2 - real_x1) ** 2 + (real_y2 - real_y1) ** 2)
+        distance_cm = np.sqrt((real_x2 - real_x1) ** 2 + (real_y2 - real_y1) ** 2)
+        
+        # 計算平均y位置，用於深度校正
+        avg_y = (py1 + py2) / 2
+        
+        # 應用深度校正
+        correction_factor = self.calculate_depth_correction_factor(avg_y, ball_area)
+        corrected_distance = distance_cm * correction_factor
+        
+        # 保存輔助信息以便調試
+        self.last_correction_info['raw_distance_cm'] = distance_cm
+        self.last_correction_info['corrected_distance_cm'] = corrected_distance
+        
+        return corrected_distance
     
     def get_approximate_real_position(self, px, py):
         """使用查找表獲取近似的實際座標，以提高效率"""
@@ -262,6 +363,68 @@ class PerspectiveCorrector:
                            (mid_point[0], mid_point[1] + 10), 
                            cv2.FONT_HERSHEY_SIMPLEX, 0.5, GRID_COLOR_BGR, 1)
         
+        # 顯示深度校正因子曲線
+        if SHOW_DEPTH_CORRECTION and self.enable_depth_correction:
+            # 繪製深度校正曲線
+            curve_width = 200
+            curve_height = 100
+            curve_x = 50
+            curve_y = self.frame_height - curve_height - 50
+            
+            # 繪製座標軸
+            cv2.line(vis_frame, (curve_x, curve_y + curve_height), 
+                    (curve_x + curve_width, curve_y + curve_height), (255, 255, 255), 1)
+            cv2.line(vis_frame, (curve_x, curve_y + curve_height), 
+                    (curve_x, curve_y), (255, 255, 255), 1)
+                    
+            # 繪製曲線
+            prev_point = None
+            for i in range(0, curve_width + 1, 5):
+                relative_pos = i / curve_width
+                # 計算相對深度 (0到1)
+                depth_factor = relative_pos
+                # 應用非線性曲線
+                corrected_factor = pow(depth_factor, self.depth_correction_curve)
+                # 計算校正因子
+                factor = 1.0 + (self.depth_correction_factor - 1.0) * corrected_factor
+                
+                # 繪製到曲線上
+                point_x = curve_x + i
+                factor_scaled = np.clip(factor, 1.0, self.depth_correction_factor)
+                factor_normalized = (factor_scaled - 1.0) / (self.depth_correction_factor - 1.0)
+                point_y = curve_y + curve_height - int(factor_normalized * curve_height)
+                
+                if prev_point:
+                    cv2.line(vis_frame, prev_point, (point_x, point_y), (0, 255, 0), 2)
+                prev_point = (point_x, point_y)
+            
+            # 標註軸線
+            cv2.putText(vis_frame, "遠端", (curve_x + curve_width - 30, curve_y + curve_height + 15), 
+                       cv2.FONT_HERSHEY_SIMPLEX, 0.4, (255, 255, 255), 1)
+            cv2.putText(vis_frame, "近端", (curve_x - 40, curve_y + curve_height + 15), 
+                       cv2.FONT_HERSHEY_SIMPLEX, 0.4, (255, 255, 255), 1)
+            cv2.putText(vis_frame, f"x{self.depth_correction_factor:.1f}", (curve_x - 40, curve_y + 5), 
+                       cv2.FONT_HERSHEY_SIMPLEX, 0.4, (255, 255, 255), 1)
+            cv2.putText(vis_frame, "深度校正曲線", (curve_x + 40, curve_y - 10), 
+                       cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 1)
+            
+            # 如果有最近的校正信息，顯示在曲線上
+            if 'depth_factor' in self.last_correction_info and 'correction' in self.last_correction_info:
+                depth_factor = self.last_correction_info['depth_factor']
+                correction = self.last_correction_info['correction']
+                
+                # 計算點的位置
+                point_x = curve_x + int(depth_factor * curve_width)
+                corr_normalized = (correction - 1.0) / (self.depth_correction_factor - 1.0)
+                point_y = curve_y + curve_height - int(corr_normalized * curve_height)
+                
+                # 繪製當前點
+                cv2.circle(vis_frame, (point_x, point_y), 5, (0, 0, 255), -1)
+                
+                # 標註校正信息
+                cv2.putText(vis_frame, f"校正: x{correction:.2f}", (point_x + 10, point_y), 
+                           cv2.FONT_HERSHEY_SIMPLEX, 0.4, (0, 255, 255), 1)
+        
         return vis_frame
 
 
@@ -285,16 +448,18 @@ class FrameData:
         self.debug_display_text = debug_display_text
         self.frame_counter = frame_counter
         self.trajectory_points_global = [] # (x,y) in global frame coordinates
+        self.ball_area = None  # 新增: 儲存球體面積
 
 
 class EventRecord:
     """Record for potential center line crossing events."""
-    def __init__(self, ball_x_global, timestamp, speed_kmh, predicted=False):
+    def __init__(self, ball_x_global, timestamp, speed_kmh, predicted=False, ball_area=None):
         self.ball_x_global = ball_x_global
         self.timestamp = timestamp
         self.speed_kmh = speed_kmh
         self.predicted = predicted
         self.processed = False
+        self.ball_area = ball_area  # 新增: 儲存球體面積，用於校正
 
 
 class FrameReader:
@@ -366,7 +531,9 @@ class PingPongSpeedTracker:
                  net_crossing_direction=NET_CROSSING_DIRECTION_DEFAULT,
                  max_net_speeds=MAX_NET_SPEEDS_TO_COLLECT,
                  near_width_cm=NEAR_SIDE_WIDTH_CM_DEFAULT,
-                 far_width_cm=FAR_SIDE_WIDTH_CM_DEFAULT):
+                 far_width_cm=FAR_SIDE_WIDTH_CM_DEFAULT,
+                 depth_correction_factor=DEPTH_CORRECTION_FACTOR,
+                 depth_correction_curve=DEPTH_CORRECTION_CURVE):
         self.debug_mode = debug_mode
         self.use_video_file = use_video_file
         self.target_fps = target_fps # For webcam FPS calculation if needed
@@ -388,6 +555,7 @@ class PingPongSpeedTracker:
         self.trajectory = deque(maxlen=MAX_TRAJECTORY_POINTS)
         self.current_ball_speed_kmh = 0
         self.last_detection_timestamp = time.time()
+        self.last_ball_area = None  # 新增: 記錄最後的球體面積
 
         self.prev_frames_gray_roi = deque(maxlen=MAX_PREV_FRAMES_FMO)
         self.opening_kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, OPENING_KERNEL_SIZE_FMO)
@@ -417,14 +585,16 @@ class PingPongSpeedTracker:
         
         self.near_side_width_cm = near_width_cm
         self.far_side_width_cm = far_width_cm
+        self.depth_correction_factor = depth_correction_factor
+        self.depth_correction_curve = depth_correction_curve
         
         self.event_buffer_center_cross = deque(maxlen=EVENT_BUFFER_SIZE_CENTER_CROSS)
         
         self.running = False
         self.file_writer_executor = concurrent.futures.ThreadPoolExecutor(max_workers=2)
 
-        # 創建透視校正器
-        self.perspective_corrector = PerspectiveCorrector(
+        # 創建進階透視校正器
+        self.perspective_corrector = AdvancedPerspectiveCorrector(
             frame_width=self.frame_width,
             frame_height=self.frame_height,
             table_length_cm=self.table_length_cm,
@@ -433,7 +603,11 @@ class PingPongSpeedTracker:
             roi_start_x=self.roi_start_x,
             roi_end_x=self.roi_end_x,
             roi_top_y=self.roi_top_y,
-            roi_bottom_y=self.roi_bottom_y
+            roi_bottom_y=self.roi_bottom_y,
+            depth_correction_factor=self.depth_correction_factor,
+            depth_correction_curve=self.depth_correction_curve,
+            enable_depth_correction=DEPTH_CORRECTION_ENABLE,
+            enable_ball_size_correction=BALL_SIZE_CORRECTION_ENABLE
         )
 
         # 為保持向後兼容性，創建原來的查找表
@@ -563,8 +737,11 @@ class PingPongSpeedTracker:
         
         self.last_detection_timestamp = time.monotonic()
         
+        # 記錄球體面積，用於球體大小校正
+        self.last_ball_area = best_ball_info['area']
+        
         if self.is_counting_active:
-            self.check_center_crossing(cx_global, current_timestamp)
+            self.check_center_crossing(cx_global, current_timestamp, self.last_ball_area)
         
         self.trajectory.append((cx_global, cy_global, current_timestamp))
         
@@ -638,7 +815,7 @@ class PingPongSpeedTracker:
                 self._generate_outputs_async()
             self.output_generated_for_session = True
 
-    def check_center_crossing(self, ball_x_global, current_timestamp):
+    def check_center_crossing(self, ball_x_global, current_timestamp, ball_area=None):
         if self.last_ball_x_global is None:
             self.last_ball_x_global = ball_x_global
             return
@@ -648,10 +825,10 @@ class PingPongSpeedTracker:
             self.last_ball_x_global = ball_x_global
             return
 
-        self._record_potential_crossing(ball_x_global, current_timestamp)
+        self._record_potential_crossing(ball_x_global, current_timestamp, ball_area)
         self.last_ball_x_global = ball_x_global
 
-    def _record_potential_crossing(self, ball_x_global, current_timestamp):
+    def _record_potential_crossing(self, ball_x_global, current_timestamp, ball_area=None):
         crossed_l_to_r = (self.last_ball_x_global < self.center_line_end_x and ball_x_global >= self.center_line_end_x)
         crossed_r_to_l = (self.last_ball_x_global > self.center_line_start_x and ball_x_global <= self.center_line_start_x)
         
@@ -661,7 +838,7 @@ class PingPongSpeedTracker:
         elif self.net_crossing_direction == 'both' and (crossed_l_to_r or crossed_r_to_l): actual_crossing_detected = True
 
         if actual_crossing_detected and self.current_ball_speed_kmh > 0:
-            event = EventRecord(ball_x_global, current_timestamp, self.current_ball_speed_kmh, predicted=False)
+            event = EventRecord(ball_x_global, current_timestamp, self.current_ball_speed_kmh, predicted=False, ball_area=ball_area)
             self.event_buffer_center_cross.append(event)
             return
 
@@ -692,7 +869,7 @@ class PingPongSpeedTracker:
                             can_add_prediction = False
                             break
                     if can_add_prediction:
-                        event = EventRecord(predicted_x_future, predicted_timestamp_future, self.current_ball_speed_kmh, predicted=True)
+                        event = EventRecord(predicted_x_future, predicted_timestamp_future, self.current_ball_speed_kmh, predicted=True, ball_area=ball_area)
                         self.event_buffer_center_cross.append(event)
 
     def _process_crossing_events(self):
@@ -739,8 +916,9 @@ class PingPongSpeedTracker:
             self.collected_relative_times.append(relative_time)
             self.last_net_crossing_detection_time = event.timestamp
             
-            status_msg = "Pred" if event.predicted else "Actual"
-            print(f"Net Speed #{len(self.collected_net_speeds)}: {event.speed_kmh:.1f} km/h @ {relative_time:.2f}s ({status_msg})")
+            status_msg = "預測" if event.predicted else "實際"
+            ball_area_msg = f", 球體面積={event.ball_area:.0f}" if event.ball_area and self.debug_mode else ""
+            print(f"Net Speed #{len(self.collected_net_speeds)}: {event.speed_kmh:.1f} km/h @ {relative_time:.2f}s ({status_msg}{ball_area_msg})")
 
         self.event_buffer_center_cross = deque(
             [e for e in self.event_buffer_center_cross if not e.processed],
@@ -763,8 +941,10 @@ class PingPongSpeedTracker:
         x1_glob, y1_glob, t1 = p1_glob
         x2_glob, y2_glob, t2 = p2_glob
 
-        # 使用新的透視校正器計算實際距離
-        dist_cm = self.perspective_corrector.get_real_distance(x1_glob, y1_glob, x2_glob, y2_glob)
+        # 使用先進的透視校正計算實際距離，包含深度校正
+        dist_cm = self.perspective_corrector.get_real_distance(
+            x1_glob, y1_glob, x2_glob, y2_glob, self.last_ball_area
+        )
         
         delta_t = t2 - t1
         if delta_t > 0:
@@ -778,7 +958,12 @@ class PingPongSpeedTracker:
                 self.current_ball_speed_kmh = speed_kmh
             
             if self.debug_mode:
-                print(f"Speed: {dist_cm:.2f}cm in {delta_t:.4f}s -> Raw {speed_kmh:.1f}km/h, Smooth {self.current_ball_speed_kmh:.1f}km/h")
+                correction_info = self.perspective_corrector.last_correction_info
+                raw_dist = correction_info.get('raw_distance_cm', 0)
+                corr_dist = correction_info.get('corrected_distance_cm', 0)
+                corr_factor = correction_info.get('correction', 1.0)
+                depth_factor = correction_info.get('depth_factor', 0)
+                print(f"Speed: 原始距離={raw_dist:.2f}cm, 校正距離={corr_dist:.2f}cm (x{corr_factor:.2f}, 深度因子={depth_factor:.2f}), 時間={delta_t:.4f}s -> 速度={speed_kmh:.1f}km/h")
         else:
             self.current_ball_speed_kmh *= (1 - SPEED_SMOOTHING_FACTOR)
 
@@ -877,6 +1062,9 @@ class PingPongSpeedTracker:
         print(f"Output files saved to {output_dir_path}")
 
     def _draw_visualizations(self, display_frame, frame_data_obj: FrameData):
+        global DEPTH_CORRECTION_ENABLE
+        global BALL_SIZE_CORRECTION_ENABLE
+        
         vis_frame = display_frame
         
         is_full_draw = frame_data_obj.frame_counter % VISUALIZATION_DRAW_INTERVAL == 0
@@ -918,10 +1106,16 @@ class PingPongSpeedTracker:
         if frame_data_obj.collected_relative_times:
             cv2.putText(vis_frame, f"Last Time: {frame_data_obj.collected_relative_times[-1]:.2f}s", (10, 230), cv2.FONT_HERSHEY_SIMPLEX, FONT_SCALE_VIS, NET_SPEED_TEXT_COLOR_BGR, FONT_THICKNESS_VIS)
 
+        # 顯示深度校正狀態
+        corr_status = "ON" if DEPTH_CORRECTION_ENABLE else "OFF"
+        corr_color = (0, 255, 0) if DEPTH_CORRECTION_ENABLE else (0, 0, 255)
+        cv2.putText(vis_frame, f"Depth Corr: {corr_status} (x{self.depth_correction_factor:.1f})", (10, 270), 
+                   cv2.FONT_HERSHEY_SIMPLEX, 0.6, corr_color, 1)
+
         cv2.putText(vis_frame, self.instruction_text, (10, self.frame_height - 20), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 1)
 
         if self.debug_mode and frame_data_obj.debug_display_text:
-            cv2.putText(vis_frame, frame_data_obj.debug_display_text, (10, 270), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (200, 200, 0), 1)
+            cv2.putText(vis_frame, frame_data_obj.debug_display_text, (10, 350), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (200, 200, 0), 1)
             
         return vis_frame
 
@@ -931,6 +1125,8 @@ class PingPongSpeedTracker:
             self.current_ball_speed_kmh = 0
 
     def process_single_frame(self, frame):
+        global DEPTH_CORRECTION_ENABLE
+        
         self.frame_counter += 1
         self._update_display_fps()
             
@@ -939,14 +1135,27 @@ class PingPongSpeedTracker:
         motion_mask_roi = self._detect_fmo()
         
         ball_pos_in_roi, ball_contour_in_roi = None, None
+        ball_area = None
         if motion_mask_roi is not None:
             ball_pos_in_roi, ball_contour_in_roi = self._detect_ball_in_roi(motion_mask_roi)
+            ball_area = self.last_ball_area
             self._calculate_ball_speed() 
         
         self._check_timeout_and_reset()
         
         if self.is_counting_active:
             self._process_crossing_events()
+
+        # 球體大小校正信息
+        corr_text = ""
+        if self.debug_mode and DEPTH_CORRECTION_ENABLE:
+            corr_text = f"深度校正: "
+            if 'correction' in self.perspective_corrector.last_correction_info:
+                corr = self.perspective_corrector.last_correction_info['correction']
+                depth = self.perspective_corrector.last_correction_info.get('depth_factor', 0)
+                raw_dist = self.perspective_corrector.last_correction_info.get('raw_distance_cm', 0)
+                corr_dist = self.perspective_corrector.last_correction_info.get('corrected_distance_cm', 0)
+                corr_text += f"因子={corr:.2f}, 深度={depth:.2f}, 距離={raw_dist:.1f}cm→{corr_dist:.1f}cm"
 
         frame_data = FrameData(
             frame=frame,
@@ -959,26 +1168,34 @@ class PingPongSpeedTracker:
             collected_net_speeds=list(self.collected_net_speeds),
             last_recorded_net_speed_kmh=self.last_recorded_net_speed_kmh,
             collected_relative_times=list(self.collected_relative_times),
-            debug_display_text=f"Traj: {len(self.trajectory)}, Events: {len(self.event_buffer_center_cross)}" if self.debug_mode else None,
+            debug_display_text=corr_text if corr_text else 
+                              f"Traj: {len(self.trajectory)}, Events: {len(self.event_buffer_center_cross)}",
             frame_counter=self.frame_counter
         )
+        frame_data.ball_area = ball_area
+        
         if self.trajectory:
             frame_data.trajectory_points_global = [(int(p[0]), int(p[1])) for p in self.trajectory]
         
         return frame_data
 
     def run(self):
-        print("=== 乒乓球速度追蹤器 v11 增強版 (四點透視校正) ===")
+        global DEPTH_CORRECTION_ENABLE
+        global BALL_SIZE_CORRECTION_ENABLE
+        
+        print("=== 乒乓球速度追蹤器 v11.1 增強版 (進階深度校正) ===")
         print(self.instruction_text)
         print(f"透視校正: 近端 {self.near_side_width_cm}cm, 遠端 {self.far_side_width_cm}cm, 長度 {self.table_length_cm}cm")
+        print(f"深度校正: {'啟用' if DEPTH_CORRECTION_ENABLE else '停用'}, 係數 x{self.depth_correction_factor:.1f}, 曲線 {self.depth_correction_curve:.1f}")
+        print(f"球體大小校正: {'啟用' if BALL_SIZE_CORRECTION_ENABLE else '停用'}")
         print(f"穿越方向: {self.net_crossing_direction}")
         print(f"目標收集速度數: {self.max_net_speeds_to_collect}")
-        if self.debug_mode: print("調試模式已啟用 (會顯示透視網格).")
+        if self.debug_mode: print("調試模式已啟用 (會顯示透視網格和校正資訊).")
 
         self.running = True
         self.reader.start()
         
-        window_name = 'Ping Pong Speed Tracker v11 Enhanced'
+        window_name = 'Ping Pong Speed Tracker v11.1 Enhanced'
         cv2.namedWindow(window_name, cv2.WINDOW_AUTOSIZE)
 
         try:
@@ -1012,6 +1229,20 @@ class PingPongSpeedTracker:
                 elif key == ord('d'):
                     self.debug_mode = not self.debug_mode
                     print(f"調試模式: {'開啟' if self.debug_mode else '關閉'}")
+                # 新增: 增加/減少深度校正因子
+                elif key == ord('+') or key == ord('='):
+                    self.depth_correction_factor += 0.1
+                    self.perspective_corrector.depth_correction_factor = self.depth_correction_factor
+                    print(f"深度校正因子增加到: {self.depth_correction_factor:.1f}")
+                elif key == ord('-') or key == ord('_'):
+                    self.depth_correction_factor = max(1.0, self.depth_correction_factor - 0.1)
+                    self.perspective_corrector.depth_correction_factor = self.depth_correction_factor
+                    print(f"深度校正因子減少到: {self.depth_correction_factor:.1f}")
+                # 新增: 開關深度校正
+                elif key == ord('c'):
+                    DEPTH_CORRECTION_ENABLE = not DEPTH_CORRECTION_ENABLE
+                    self.perspective_corrector.enable_depth_correction = DEPTH_CORRECTION_ENABLE
+                    print(f"深度校正: {'啟用' if DEPTH_CORRECTION_ENABLE else '停用'}")
 
         except KeyboardInterrupt:
             print("程序被用戶中斷.")
@@ -1031,7 +1262,10 @@ class PingPongSpeedTracker:
 
 
 def main():
-    parser = argparse.ArgumentParser(description='乒乓球速度追蹤器 v11 增強版')
+    global DEPTH_CORRECTION_ENABLE
+    global BALL_SIZE_CORRECTION_ENABLE
+    
+    parser = argparse.ArgumentParser(description='乒乓球速度追蹤器 v11.1 進階深度校正版')
     parser.add_argument('--video', type=str, default=None, help='視頻檔路徑. 如果不指定則使用網路攝影機.')
     parser.add_argument('--camera_idx', type=int, default=DEFAULT_CAMERA_INDEX, help='網路攝影機索引.')
     parser.add_argument('--fps', type=int, default=DEFAULT_TARGET_FPS, help='目標幀率.')
@@ -1047,9 +1281,21 @@ def main():
     parser.add_argument('--near_width', type=int, default=NEAR_SIDE_WIDTH_CM_DEFAULT, help='ROI近端實際寬度 (cm).')
     parser.add_argument('--far_width', type=int, default=FAR_SIDE_WIDTH_CM_DEFAULT, help='ROI遠端實際寬度 (cm).')
     
+    parser.add_argument('--depth_corr', type=float, default=DEPTH_CORRECTION_FACTOR, help='深度校正係數 (預設1.6).')
+    parser.add_argument('--depth_curve', type=float, default=DEPTH_CORRECTION_CURVE, help='深度校正曲線 (預設2.0).')
+    parser.add_argument('--disable_depth_corr', action='store_true', help='停用深度校正.')
+    parser.add_argument('--disable_size_corr', action='store_true', help='停用球體大小校正.')
+    
     parser.add_argument('--debug', action='store_true', default=DEBUG_MODE_DEFAULT, help='啟用調試輸出.')
 
     args = parser.parse_args()
+    
+    # 根據命令列參數設置全局變數
+    if args.disable_depth_corr:
+        DEPTH_CORRECTION_ENABLE = False
+    
+    if args.disable_size_corr:
+        BALL_SIZE_CORRECTION_ENABLE = False
 
     video_source_arg = args.video if args.video else args.camera_idx
     use_video_file_arg = True if args.video else False
@@ -1066,7 +1312,9 @@ def main():
         net_crossing_direction=args.direction,
         max_net_speeds=args.count,
         near_width_cm=args.near_width,
-        far_width_cm=args.far_width
+        far_width_cm=args.far_width,
+        depth_correction_factor=args.depth_corr,
+        depth_correction_curve=args.depth_curve
     )
     tracker.run()
 
