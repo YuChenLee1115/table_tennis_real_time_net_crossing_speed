@@ -1,7 +1,9 @@
 #!/usr/bin/env python3
-# 乒乓球速度追蹤系統 v11.1 高級深度校正版
+# 乒乓球速度追蹤系統 v11.2 (Restored Annotations, Improved Timeout Handling)
 # Lightweight, optimized, multi-threaded (acquisition & I/O), macOS compatible
-# 增強版：添加高精度四點透視校正技術與非線性深度校正
+# Added interpolation for crossing detection and multi-point speed calculation.
+# Waits indefinitely for webcam frames instead of shutting down on temporary timeout.
+# Restored point annotations on the output chart.
 
 import cv2
 import numpy as np
@@ -18,55 +20,49 @@ import csv
 import threading
 import queue
 import concurrent.futures
+import time # Explicitly import time for perf_counter
 
 # —— Global Parameter Configuration ——
 # Basic Settings
 DEFAULT_CAMERA_INDEX = 0
-DEFAULT_TARGET_FPS = 120
-DEFAULT_FRAME_WIDTH = 1920
-DEFAULT_FRAME_HEIGHT = 1080
-DEFAULT_TABLE_LENGTH_CM = 152  # 更新到圖中顯示的值 (152cm)
+DEFAULT_TARGET_FPS = 120 # Target FPS for webcam setup
+DEFAULT_FRAME_WIDTH = 1280 # Reduced default width for performance
+DEFAULT_FRAME_HEIGHT = 720 # Reduced default height for performance
+DEFAULT_TABLE_LENGTH_CM = 142
 
 # Detection Parameters
-DEFAULT_DETECTION_TIMEOUT = 0.05
+DEFAULT_DETECTION_TIMEOUT = 0.2 # Timeout for resetting trajectory if ball not seen
 DEFAULT_ROI_START_RATIO = 0.4
 DEFAULT_ROI_END_RATIO = 0.6
 DEFAULT_ROI_BOTTOM_RATIO = 0.8
-MAX_TRAJECTORY_POINTS = 80
+MAX_TRAJECTORY_POINTS = 120
 
 # Center Line Detection
-CENTER_LINE_WIDTH_PIXELS = 20
-CENTER_DETECTION_COOLDOWN_S = 0.15
+CENTER_LINE_WIDTH_PIXELS = 55 # Width of the central detection zone
+CENTER_DETECTION_COOLDOWN_S = 0.01 # Cooldown between consecutive net crossing detections
 MAX_NET_SPEEDS_TO_COLLECT = 27
 NET_CROSSING_DIRECTION_DEFAULT = 'left_to_right' # 'left_to_right', 'right_to_left', 'both'
 AUTO_STOP_AFTER_COLLECTION = False
 OUTPUT_DATA_FOLDER = 'real_time_output'
 
 # Perspective Correction
-NEAR_SIDE_WIDTH_CM_DEFAULT = 29  # 圖中顯示的近端寬度
-FAR_SIDE_WIDTH_CM_DEFAULT = 72   # 圖中顯示的遠端寬度
-
-# 深度校正參數 - 新增
-DEPTH_CORRECTION_ENABLE = True   # 是否啟用深度校正
-DEPTH_CORRECTION_FACTOR = 3    # 深度校正因子（用於調整遠端測量值）
-DEPTH_CORRECTION_CURVE = 4.0     # 深度校正曲線（控制校正量的非線性程度）
-BALL_SIZE_CORRECTION_ENABLE = True  # 是否使用球體大小作為深度參考
+NEAR_SIDE_WIDTH_CM_DEFAULT = 29
+FAR_SIDE_WIDTH_CM_DEFAULT = 72
 
 # FMO (Fast Moving Object) Parameters
-MAX_PREV_FRAMES_FMO = 5
-OPENING_KERNEL_SIZE_FMO = (10, 10)
-CLOSING_KERNEL_SIZE_FMO = (15, 15)
-THRESHOLD_VALUE_FMO = 10
+MAX_PREV_FRAMES_FMO = 10
+OPENING_KERNEL_SIZE_FMO = (10, 10) # Consider reducing if performance is an issue
+CLOSING_KERNEL_SIZE_FMO = (25, 25) # Consider reducing if performance is an issue
+THRESHOLD_VALUE_FMO = 8
 
 # Ball Detection Parameters
-MIN_BALL_AREA_PX = 10
-MAX_BALL_AREA_PX = 7000
-MIN_BALL_CIRCULARITY = 0.5
-REFERENCE_BALL_AREA = 400  # 參考球體大小（像素面積）- 新增
-
+MIN_BALL_AREA_PX = 5
+MAX_BALL_AREA_PX = 10000
+MIN_BALL_CIRCULARITY = 0.4
 # Speed Calculation
-SPEED_SMOOTHING_FACTOR = 0.5
+SPEED_SMOOTHING_FACTOR = 0.3
 KMH_CONVERSION_FACTOR = 0.036
+SPEED_CALC_POINTS = 3 # Number of recent points to use for speed calculation (min 2)
 
 # FPS Calculation
 FPS_SMOOTHING_FACTOR = 0.4
@@ -81,352 +77,28 @@ SPEED_TEXT_COLOR_BGR = (0, 0, 255)
 FPS_TEXT_COLOR_BGR = (0, 255, 0)
 CENTER_LINE_COLOR_BGR = (0, 255, 255)
 NET_SPEED_TEXT_COLOR_BGR = (255, 0, 0)
-FONT_SCALE_VIS = 1
+FONT_SCALE_VIS = 0.8 # Adjusted font scale for potentially smaller frames
 FONT_THICKNESS_VIS = 2
-VISUALIZATION_DRAW_INTERVAL = 2 # Draw full visuals every N frames
-GRID_COLOR_BGR = (0, 255, 255)  # 透視網格顏色
+VISUALIZATION_DRAW_INTERVAL = 3 # Draw full visuals every N frames (Increased default)
 
 # Threading & Queue Parameters
-FRAME_QUEUE_SIZE = 5 # For FrameReader
-EVENT_BUFFER_SIZE_CENTER_CROSS = 20
-PREDICTION_LOOKAHEAD_FRAMES = 5
+FRAME_QUEUE_SIZE = 5 # Reduced queue size, might help reduce latency perception
+EVENT_BUFFER_SIZE_CENTER_CROSS = 50 # Reduced buffer size
+PREDICTION_LOOKAHEAD_FRAMES = 15 # For optional prediction logic
 
 # Debug
 DEBUG_MODE_DEFAULT = False
-DRAW_GRID_INTERVAL = 30  # 每30幀繪製一次透視網格
-SHOW_DEPTH_CORRECTION = True  # 顯示深度校正資訊
 
 # —— OpenCV Optimization ——
 cv2.setUseOptimized(True)
 try:
-    cv2.setNumThreads(os.cpu_count() or 4)
+    num_threads = os.cpu_count()
+    if num_threads and num_threads > 1:
+        cv2.setNumThreads(num_threads) # Use available cores
+    else:
+        cv2.setNumThreads(4) # Fallback
 except AttributeError:
-    cv2.setNumThreads(4)
-
-
-class AdvancedPerspectiveCorrector:
-    """用於桌球場景的進階透視校正，包含非線性深度校正"""
-    
-    def __init__(self, frame_width, frame_height, 
-                 table_length_cm, near_width_cm, far_width_cm,
-                 roi_start_x, roi_end_x, roi_top_y, roi_bottom_y,
-                 depth_correction_factor=DEPTH_CORRECTION_FACTOR,
-                 depth_correction_curve=DEPTH_CORRECTION_CURVE,
-                 enable_depth_correction=DEPTH_CORRECTION_ENABLE,
-                 enable_ball_size_correction=BALL_SIZE_CORRECTION_ENABLE):
-        """
-        初始化進階透視校正器
-        
-        Args:
-            frame_width, frame_height: 影像尺寸
-            table_length_cm: 桌球桌長度（公分）
-            near_width_cm: 近端寬度（公分）
-            far_width_cm: 遠端寬度（公分）
-            roi_*: ROI區域座標
-            depth_correction_factor: 深度校正係數
-            depth_correction_curve: 深度校正曲線指數
-            enable_depth_correction: 是否啟用深度校正
-            enable_ball_size_correction: 是否啟用球體大小校正
-        """
-        self.frame_width = frame_width
-        self.frame_height = frame_height
-        self.table_length_cm = table_length_cm
-        self.near_width_cm = near_width_cm
-        self.far_width_cm = far_width_cm
-        
-        # ROI 區域
-        self.roi_start_x = roi_start_x
-        self.roi_end_x = roi_end_x
-        self.roi_top_y = roi_top_y
-        self.roi_bottom_y = roi_bottom_y
-        
-        # 深度校正參數
-        self.depth_correction_factor = depth_correction_factor
-        self.depth_correction_curve = depth_correction_curve
-        self.enable_depth_correction = enable_depth_correction
-        self.enable_ball_size_correction = enable_ball_size_correction
-        
-        # 最後一次校正信息（用於調試）
-        self.last_correction_info = {}
-        
-        # 設置透視變換
-        self.setup_homography()
-    
-    def setup_homography(self):
-        """設置透視變換矩陣，基於四角對應法"""
-        # 原始影像上的四個點（左上、右上、左下、右下）
-        self.src_points = np.array([
-            [self.roi_start_x, self.roi_top_y],             # 左上
-            [self.roi_end_x, self.roi_top_y],               # 右上
-            [self.roi_start_x, self.roi_bottom_y],          # 左下
-            [self.roi_end_x, self.roi_bottom_y]             # 右下
-        ], dtype=np.float32)
-        
-        # 實際空間中的對應點（公分）
-        # 考慮到遠近寬度差異，遠端（上方）比近端（下方）窄
-        far_half_width = self.far_width_cm / 2
-        near_half_width = self.near_width_cm / 2
-        
-        self.dst_points_cm = np.array([
-            [-far_half_width, 0],                           # 左上（遠端）
-            [far_half_width, 0],                            # 右上（遠端）
-            [-near_half_width, self.table_length_cm],       # 左下（近端）
-            [near_half_width, self.table_length_cm]         # 右下（近端）
-        ], dtype=np.float32)
-        
-        # 計算透視變換矩陣（從像素到公分）
-        self.homography_matrix = cv2.getPerspectiveTransform(self.src_points, self.dst_points_cm)
-        
-        # 計算反向透視變換矩陣（從公分到像素）
-        self.inv_homography_matrix = cv2.getPerspectiveTransform(self.dst_points_cm, self.src_points)
-        
-        # 建立查找表以加速計算
-        self.create_lookup_tables()
-    
-    def create_lookup_tables(self):
-        """建立像素座標到實際座標的查找表，提高效率"""
-        # 為提高效率，我們每隔幾個像素建立一次對照
-        step = 10  # 每10個像素採樣一次
-        self.position_lookup = {}
-        
-        # 針對ROI區域內的點建立查找表
-        for y in range(self.roi_top_y, self.roi_bottom_y + 1, step):
-            for x in range(self.roi_start_x, self.roi_end_x + 1, step):
-                # 計算該點在實際空間中的座標
-                real_x, real_y = self.pixel_to_real_position(x, y)
-                # 儲存到查找表
-                self.position_lookup[(x, y)] = (real_x, real_y)
-    
-    def pixel_to_real_position(self, px, py):
-        """將像素座標轉換為實際空間座標（公分）"""
-        # 組織為單點格式以便透視變換
-        point = np.array([[[px, py]]], dtype=np.float32)
-        
-        # 應用透視變換
-        transformed = cv2.perspectiveTransform(point, self.homography_matrix)
-        
-        # 返回實際座標 (x, y)，以公分為單位
-        return transformed[0][0][0], transformed[0][0][1]
-    
-    def real_to_pixel_position(self, real_x, real_y):
-        """將實際空間座標（公分）轉換為像素座標"""
-        # 組織為單點格式以便反向透視變換
-        point = np.array([[[real_x, real_y]]], dtype=np.float32)
-        
-        # 應用反向透視變換
-        transformed = cv2.perspectiveTransform(point, self.inv_homography_matrix)
-        
-        # 返回像素座標 (px, py)
-        return transformed[0][0][0], transformed[0][0][1]
-    
-    def calculate_depth_correction_factor(self, y_position, ball_area=None):
-        """
-        計算基於深度的校正因子
-        
-        Args:
-            y_position: 在畫面中的y座標（用於估計深度）
-            ball_area: 球體面積（可選，用於進一步提高精度）
-            
-        Returns:
-            float: 速度校正因子
-        """
-        # 如果未啟用深度校正，返回1.0（無校正）
-        if not self.enable_depth_correction:
-            return 1.0
-            
-        # 計算相對深度（0=遠端/頂部，1=近端/底部）
-        relative_depth = 0
-        if self.roi_bottom_y > self.roi_top_y:  # 避免除以零
-            relative_depth = (y_position - self.roi_top_y) / (self.roi_bottom_y - self.roi_top_y)
-            relative_depth = np.clip(relative_depth, 0.0, 1.0)
-        
-        # 反轉相對深度，使0表示近端（底部），1表示遠端（頂部）
-        depth_factor = 1.0 - relative_depth
-        
-        # 應用非線性曲線，使校正在遠端更強
-        # depth_factor值域是0到1，0是近端，1是遠端
-        # 通過冪運算使曲線變得非線性
-        depth_factor = pow(depth_factor, self.depth_correction_curve)
-        
-        # 根據深度因子計算最終校正因子
-        # 從1.0（底部/近端）到depth_correction_factor（頂部/遠端）的線性插值
-        correction = 1.0 + (self.depth_correction_factor - 1.0) * depth_factor
-        
-        # 球體大小校正（如果啟用且提供了球體面積）
-        if self.enable_ball_size_correction and ball_area is not None and ball_area > 0 and REFERENCE_BALL_AREA > 0:
-            # 球體大小比例（與參考大小比較）
-            size_ratio = math.sqrt(REFERENCE_BALL_AREA / ball_area)
-            # 限制比例在合理範圍內
-            size_ratio = np.clip(size_ratio, 0.5, 2.0)
-            # 混合深度校正和球體大小校正
-            correction = correction * 0.7 + size_ratio * 0.3
-        
-        # 保存最後的校正信息以便調試
-        self.last_correction_info = {
-            'y_position': y_position,
-            'relative_depth': relative_depth,
-            'depth_factor': depth_factor,
-            'ball_area': ball_area,
-            'correction': correction
-        }
-        
-        return correction
-    
-    def get_real_distance(self, px1, py1, px2, py2, ball_area=None):
-        """
-        計算兩點在實際空間中的距離（公分），包含深度校正
-        
-        Args:
-            px1, py1: 第一個點的像素座標
-            px2, py2: 第二個點的像素座標
-            ball_area: 球體面積（可選，用於球體大小校正）
-            
-        Returns:
-            float: 校正後的實際距離（公分）
-        """
-        # 轉換兩點到實際座標
-        real_x1, real_y1 = self.get_approximate_real_position(px1, py1)
-        real_x2, real_y2 = self.get_approximate_real_position(px2, py2)
-        
-        # 計算歐氏距離
-        distance_cm = np.sqrt((real_x2 - real_x1) ** 2 + (real_y2 - real_y1) ** 2)
-        
-        # 計算平均y位置，用於深度校正
-        avg_y = (py1 + py2) / 2
-        
-        # 應用深度校正
-        correction_factor = self.calculate_depth_correction_factor(avg_y, ball_area)
-        corrected_distance = distance_cm * correction_factor
-        
-        # 保存輔助信息以便調試
-        self.last_correction_info['raw_distance_cm'] = distance_cm
-        self.last_correction_info['corrected_distance_cm'] = corrected_distance
-        
-        return corrected_distance
-    
-    def get_approximate_real_position(self, px, py):
-        """使用查找表獲取近似的實際座標，以提高效率"""
-        # 將座標對齊到最近的查找表網格點
-        step = 10
-        lookup_x = round(px / step) * step
-        lookup_y = round(py / step) * step
-        
-        # 限制在查找表範圍內
-        lookup_x = max(self.roi_start_x, min(self.roi_end_x, lookup_x))
-        lookup_y = max(self.roi_top_y, min(self.roi_bottom_y, lookup_y))
-        
-        # 從查找表中獲取近似值
-        if (lookup_x, lookup_y) in self.position_lookup:
-            return self.position_lookup[(lookup_x, lookup_y)]
-        
-        # 如果查找表中沒有，計算精確值
-        return self.pixel_to_real_position(px, py)
-    
-    def visualize_grid(self, frame, grid_step_cm=20):
-        """在影像上繪製實際空間的網格，用於調試和可視化"""
-        # 創建一個視覺化用的拷貝
-        vis_frame = frame.copy()
-        
-        # 畫橫線（等間隔實際距離）
-        for real_y in range(0, int(self.table_length_cm) + 1, grid_step_cm):
-            points = []
-            for real_x in range(int(-self.near_width_cm), int(self.near_width_cm) + 1, 5):
-                px, py = self.real_to_pixel_position(real_x, real_y)
-                if (px >= 0 and px < self.frame_width and py >= 0 and py < self.frame_height):
-                    points.append((int(px), int(py)))
-            
-            if len(points) >= 2:
-                for i in range(len(points) - 1):
-                    cv2.line(vis_frame, points[i], points[i+1], GRID_COLOR_BGR, 1)
-                
-                # 標註距離
-                mid_point = points[len(points) // 2]
-                cv2.putText(vis_frame, f"{real_y}cm", 
-                           (mid_point[0] - 20, mid_point[1]), 
-                           cv2.FONT_HERSHEY_SIMPLEX, 0.5, GRID_COLOR_BGR, 1)
-        
-        # 畫縱線（等間隔實際距離）
-        for real_x in range(int(-self.near_width_cm/2), int(self.near_width_cm/2) + 1, grid_step_cm):
-            points = []
-            for real_y in range(0, int(self.table_length_cm) + 1, 5):
-                px, py = self.real_to_pixel_position(real_x, real_y)
-                if (px >= 0 and px < self.frame_width and py >= 0 and py < self.frame_height):
-                    points.append((int(px), int(py)))
-            
-            if len(points) >= 2:
-                for i in range(len(points) - 1):
-                    cv2.line(vis_frame, points[i], points[i+1], GRID_COLOR_BGR, 1)
-                
-                # 標註距離
-                mid_point = points[len(points) // 2]
-                cv2.putText(vis_frame, f"{real_x}cm", 
-                           (mid_point[0], mid_point[1] + 10), 
-                           cv2.FONT_HERSHEY_SIMPLEX, 0.5, GRID_COLOR_BGR, 1)
-        
-        # 顯示深度校正因子曲線
-        if SHOW_DEPTH_CORRECTION and self.enable_depth_correction:
-            # 繪製深度校正曲線
-            curve_width = 200
-            curve_height = 100
-            curve_x = 50
-            curve_y = self.frame_height - curve_height - 50
-            
-            # 繪製座標軸
-            cv2.line(vis_frame, (curve_x, curve_y + curve_height), 
-                    (curve_x + curve_width, curve_y + curve_height), (255, 255, 255), 1)
-            cv2.line(vis_frame, (curve_x, curve_y + curve_height), 
-                    (curve_x, curve_y), (255, 255, 255), 1)
-                    
-            # 繪製曲線
-            prev_point = None
-            for i in range(0, curve_width + 1, 5):
-                relative_pos = i / curve_width
-                # 計算相對深度 (0到1)
-                depth_factor = relative_pos
-                # 應用非線性曲線
-                corrected_factor = pow(depth_factor, self.depth_correction_curve)
-                # 計算校正因子
-                factor = 1.0 + (self.depth_correction_factor - 1.0) * corrected_factor
-                
-                # 繪製到曲線上
-                point_x = curve_x + i
-                factor_scaled = np.clip(factor, 1.0, self.depth_correction_factor)
-                factor_normalized = (factor_scaled - 1.0) / (self.depth_correction_factor - 1.0)
-                point_y = curve_y + curve_height - int(factor_normalized * curve_height)
-                
-                if prev_point:
-                    cv2.line(vis_frame, prev_point, (point_x, point_y), (0, 255, 0), 2)
-                prev_point = (point_x, point_y)
-            
-            # 標註軸線
-            cv2.putText(vis_frame, "遠端", (curve_x + curve_width - 30, curve_y + curve_height + 15), 
-                       cv2.FONT_HERSHEY_SIMPLEX, 0.4, (255, 255, 255), 1)
-            cv2.putText(vis_frame, "近端", (curve_x - 40, curve_y + curve_height + 15), 
-                       cv2.FONT_HERSHEY_SIMPLEX, 0.4, (255, 255, 255), 1)
-            cv2.putText(vis_frame, f"x{self.depth_correction_factor:.1f}", (curve_x - 40, curve_y + 5), 
-                       cv2.FONT_HERSHEY_SIMPLEX, 0.4, (255, 255, 255), 1)
-            cv2.putText(vis_frame, "深度校正曲線", (curve_x + 40, curve_y - 10), 
-                       cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 1)
-            
-            # 如果有最近的校正信息，顯示在曲線上
-            if 'depth_factor' in self.last_correction_info and 'correction' in self.last_correction_info:
-                depth_factor = self.last_correction_info['depth_factor']
-                correction = self.last_correction_info['correction']
-                
-                # 計算點的位置
-                point_x = curve_x + int(depth_factor * curve_width)
-                corr_normalized = (correction - 1.0) / (self.depth_correction_factor - 1.0)
-                point_y = curve_y + curve_height - int(corr_normalized * curve_height)
-                
-                # 繪製當前點
-                cv2.circle(vis_frame, (point_x, point_y), 5, (0, 0, 255), -1)
-                
-                # 標註校正信息
-                cv2.putText(vis_frame, f"校正: x{correction:.2f}", (point_x + 10, point_y), 
-                           cv2.FONT_HERSHEY_SIMPLEX, 0.4, (0, 255, 255), 1)
-        
-        return vis_frame
-
+    cv2.setNumThreads(4) # Default if os.cpu_count fails
 
 class FrameData:
     """Data structure for passing frame-related information."""
@@ -434,7 +106,7 @@ class FrameData:
                  ball_contour_in_roi=None, current_ball_speed_kmh=0,
                  display_fps=0, is_counting_active=False, collected_net_speeds=None,
                  last_recorded_net_speed_kmh=0, collected_relative_times=None,
-                 debug_display_text=None, frame_counter=0):
+                 debug_display_text=None, frame_counter=0, profiling_info=""):
         self.frame = frame
         self.roi_sub_frame = roi_sub_frame # The ROI portion of the frame
         self.ball_position_in_roi = ball_position_in_roi # (x,y) relative to ROI
@@ -448,25 +120,22 @@ class FrameData:
         self.debug_display_text = debug_display_text
         self.frame_counter = frame_counter
         self.trajectory_points_global = [] # (x,y) in global frame coordinates
-        self.ball_area = None  # 新增: 儲存球體面積
-
+        self.profiling_info = profiling_info # For debug timing
 
 class EventRecord:
     """Record for potential center line crossing events."""
-    def __init__(self, ball_x_global, timestamp, speed_kmh, predicted=False, ball_area=None):
+    def __init__(self, ball_x_global, timestamp, speed_kmh, predicted=False):
         self.ball_x_global = ball_x_global
-        self.timestamp = timestamp
+        self.timestamp = timestamp # Can be interpolated time
         self.speed_kmh = speed_kmh
         self.predicted = predicted
-        self.processed = False
-        self.ball_area = ball_area  # 新增: 儲存球體面積，用於校正
-
+        self.processed = False # Flag to avoid processing multiple times
 
 class FrameReader:
     """Reads frames from camera or video file in a separate thread."""
     def __init__(self, video_source, target_fps, use_video_file, frame_width, frame_height):
         self.video_source = video_source
-        self.target_fps = target_fps
+        self.target_fps = target_fps # Target FPS for webcam setting
         self.use_video_file = use_video_file
         self.cap = cv2.VideoCapture(self.video_source)
         self._configure_capture(frame_width, frame_height)
@@ -475,53 +144,96 @@ class FrameReader:
         self.running = False
         self.thread = threading.Thread(target=self._read_frames, daemon=True)
 
+        # Get actual properties AFTER configuration attempts
         self.actual_fps = self.cap.get(cv2.CAP_PROP_FPS)
         self.frame_width = int(self.cap.get(cv2.CAP_PROP_FRAME_WIDTH))
         self.frame_height = int(self.cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
 
+        print(f"Requested Res: {frame_width}x{frame_height}, Actual Res: {self.frame_width}x{self.frame_height}")
+        print(f"Requested FPS: {target_fps}, Actual FPS from camera: {self.actual_fps:.2f}")
+
+        # If webcam reports unreliable FPS (0 or very high), use target as a fallback for calculations
         if not self.use_video_file and (self.actual_fps <= 0 or self.actual_fps > 1000):
-             self.actual_fps = self.target_fps # Use target if webcam FPS is unreliable
+             print(f"Warning: Unreliable FPS ({self.actual_fps}) reported by webcam. Using target FPS ({self.target_fps}) for some calculations.")
+             self.display_fps_source = self.target_fps # Base value for display FPS calc
+        else:
+             self.display_fps_source = self.actual_fps # Use reported FPS from video/reliable webcam
 
     def _configure_capture(self, frame_width, frame_height):
+        if not self.cap.isOpened():
+            raise IOError(f"Cannot open video source: {self.video_source}")
         if not self.use_video_file:
+            # Attempt to set desired properties
             self.cap.set(cv2.CAP_PROP_FRAME_WIDTH, frame_width)
             self.cap.set(cv2.CAP_PROP_FRAME_HEIGHT, frame_height)
             self.cap.set(cv2.CAP_PROP_FPS, self.target_fps)
-        if not self.cap.isOpened():
-            raise IOError(f"Cannot open video source: {self.video_source}")
+            # Some cameras might need specific fourcc codes for high FPS, e.g., 'MJPG'
+            # self.cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*'MJPG'))
 
     def _read_frames(self):
         while self.running:
             if not self.frame_queue.full():
                 ret, frame = self.cap.read()
                 if not ret:
-                    self.running = False # End of video or camera error
-                    self.frame_queue.put((False, None)) # Signal end
-                    break
-                self.frame_queue.put((True, frame))
+                    # If read fails, could be end of file or camera issue.
+                    # Signal the problem but let the main loop decide based on self.running state.
+                    print("FrameReader: read() returned False.")
+                    # Keep trying to read unless stop() is called (self.running becomes False)
+                    # If it's a persistent camera issue, read() will keep returning False.
+                    # Put a signal indicating failure? Or just let read() in main loop timeout?
+                    # Let's signal failure so main loop knows it's not just empty queue.
+                    try:
+                        # Put a failure marker, but don't block if queue is full (shouldn't be if read failed)
+                        self.frame_queue.put_nowait((False, None))
+                    except queue.Full:
+                        pass # If queue is full, main loop will find out anyway
+                    # Add a small sleep to prevent tight loop on persistent error
+                    time.sleep(0.1)
+                    # We don't set self.running=False here anymore, stop() method does that.
+                else:
+                    # Successfully read a frame
+                    self.frame_queue.put((True, frame))
             else:
-                time.sleep(1.0 / (self.target_fps * 2)) # Avoid busy-waiting if queue is full
+                # Queue is full, sleep briefly to yield CPU
+                time.sleep(0.001) # Shorter sleep
 
     def start(self):
-        self.running = True
-        self.thread.start()
+        if not self.running:
+            self.running = True
+            self.thread.start()
 
     def read(self):
+        """Reads from the queue with a timeout."""
         try:
-            return self.frame_queue.get(timeout=1.0) # Wait up to 1s for a frame
+            # Calculate timeout based on expected FPS, with a minimum
+            timeout_duration = max(0.001, 1.0 / self.display_fps_source if self.display_fps_source > 0 else 0.1)
+            return self.frame_queue.get(timeout=timeout_duration)
         except queue.Empty:
-            return False, None # Timeout
+            # This means no frame arrived within the timeout, but doesn't necessarily mean error yet.
+            return None, None # Return None, None to indicate timeout
 
     def stop(self):
-        self.running = False
+        """Stops the reading thread and releases the camera."""
+        self.running = False # Signal the thread to stop reading
         if self.thread.is_alive():
-            self.thread.join(timeout=2.0) # Wait for thread to finish
+            # Clear queue to unblock thread if it's waiting on put()
+            while not self.frame_queue.empty():
+                try:
+                    self.frame_queue.get_nowait()
+                except queue.Empty:
+                    break
+            self.thread.join(timeout=1.0) # Wait briefly for thread to exit
         if self.cap.isOpened():
             self.cap.release()
+        print("FrameReader stopped.")
+
+    @property
+    def is_running(self):
+        """Check if the reading thread is supposed to be running."""
+        return self.running
 
     def get_properties(self):
-        return self.actual_fps, self.frame_width, self.frame_height
-
+        return self.display_fps_source, self.frame_width, self.frame_height
 
 class PingPongSpeedTracker:
     def __init__(self, video_source=DEFAULT_CAMERA_INDEX, table_length_cm=DEFAULT_TABLE_LENGTH_CM,
@@ -531,271 +243,322 @@ class PingPongSpeedTracker:
                  net_crossing_direction=NET_CROSSING_DIRECTION_DEFAULT,
                  max_net_speeds=MAX_NET_SPEEDS_TO_COLLECT,
                  near_width_cm=NEAR_SIDE_WIDTH_CM_DEFAULT,
-                 far_width_cm=FAR_SIDE_WIDTH_CM_DEFAULT,
-                 depth_correction_factor=DEPTH_CORRECTION_FACTOR,
-                 depth_correction_curve=DEPTH_CORRECTION_CURVE):
+                 far_width_cm=FAR_SIDE_WIDTH_CM_DEFAULT):
         self.debug_mode = debug_mode
         self.use_video_file = use_video_file
-        self.target_fps = target_fps # For webcam FPS calculation if needed
+        # self.target_fps = target_fps # Target FPS stored in FrameReader
 
         self.reader = FrameReader(video_source, target_fps, use_video_file, frame_width, frame_height)
+        # Use the potentially adjusted FPS source from the reader
         self.actual_fps, self.frame_width, self.frame_height = self.reader.get_properties()
-        self.display_fps = self.actual_fps # Initial display FPS
+        self.display_fps = self.actual_fps # Initial display FPS, will be updated
 
+        # --- Rest of __init__ ---
         self.table_length_cm = table_length_cm
         self.detection_timeout_s = detection_timeout_s
-        self.pixels_per_cm_nominal = self.frame_width / self.table_length_cm # Nominal, used if perspective fails
+        # Nominal pixels_per_cm, less critical with perspective lookup
+        # self.pixels_per_cm_nominal = self.frame_width / self.table_length_cm
 
         self.roi_start_x = int(self.frame_width * DEFAULT_ROI_START_RATIO)
         self.roi_end_x = int(self.frame_width * DEFAULT_ROI_END_RATIO)
         self.roi_top_y = 0 # ROI starts from top of the frame
         self.roi_bottom_y = int(self.frame_height * DEFAULT_ROI_BOTTOM_RATIO)
         self.roi_height_px = self.roi_bottom_y - self.roi_top_y
+        self.roi_width_px = self.roi_end_x - self.roi_start_x
 
         self.trajectory = deque(maxlen=MAX_TRAJECTORY_POINTS)
         self.current_ball_speed_kmh = 0
-        self.last_detection_timestamp = time.time()
-        self.last_ball_area = None  # 新增: 記錄最後的球體面積
+        self.last_detection_timestamp = time.monotonic() # Use monotonic clock for timeout
 
         self.prev_frames_gray_roi = deque(maxlen=MAX_PREV_FRAMES_FMO)
         self.opening_kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, OPENING_KERNEL_SIZE_FMO)
         self.closing_kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, CLOSING_KERNEL_SIZE_FMO)
 
         self.frame_counter = 0
-        self.last_frame_timestamp_for_fps = time.time()
+        # self.last_frame_timestamp_for_fps = time.monotonic() # Renamed/replaced by deque logic
         self.frame_timestamps_for_fps = deque(maxlen=MAX_FRAME_TIMES_FPS_CALC)
 
         self.center_x_global = self.frame_width // 2
         self.center_line_start_x = self.center_x_global - CENTER_LINE_WIDTH_PIXELS // 2
         self.center_line_end_x = self.center_x_global + CENTER_LINE_WIDTH_PIXELS // 2
-        
+
         self.net_crossing_direction = net_crossing_direction
         self.max_net_speeds_to_collect = max_net_speeds
         self.collected_net_speeds = []
         self.collected_relative_times = []
-        self.last_net_crossing_detection_time = 0
+        self.last_net_crossing_detection_time = 0 # Timestamp of the last recorded crossing event
         self.last_recorded_net_speed_kmh = 0
         self.last_ball_x_global = None
+        self.last_ball_timestamp = None # NEW: Timestamp of the last detected ball position
+
         self.output_generated_for_session = False
-        
         self.is_counting_active = False
         self.count_session_id = 0
         self.timing_started_for_session = False
         self.first_ball_crossing_timestamp = None
-        
+
         self.near_side_width_cm = near_width_cm
         self.far_side_width_cm = far_width_cm
-        self.depth_correction_factor = depth_correction_factor
-        self.depth_correction_curve = depth_correction_curve
-        
+
         self.event_buffer_center_cross = deque(maxlen=EVENT_BUFFER_SIZE_CENTER_CROSS)
-        
-        self.running = False
+
+        self.main_loop_running = False # Renamed from self.running to avoid conflict
+        # Increased workers slightly, consider adjusting based on CPU/task nature
         self.file_writer_executor = concurrent.futures.ThreadPoolExecutor(max_workers=2)
 
-        # 創建進階透視校正器
-        self.perspective_corrector = AdvancedPerspectiveCorrector(
-            frame_width=self.frame_width,
-            frame_height=self.frame_height,
-            table_length_cm=self.table_length_cm,
-            near_width_cm=self.near_side_width_cm,
-            far_width_cm=self.far_side_width_cm,
-            roi_start_x=self.roi_start_x,
-            roi_end_x=self.roi_end_x,
-            roi_top_y=self.roi_top_y,
-            roi_bottom_y=self.roi_bottom_y,
-            depth_correction_factor=self.depth_correction_factor,
-            depth_correction_curve=self.depth_correction_curve,
-            enable_depth_correction=DEPTH_CORRECTION_ENABLE,
-            enable_ball_size_correction=BALL_SIZE_CORRECTION_ENABLE
-        )
-
-        # 為保持向後兼容性，創建原來的查找表
-        self._create_perspective_lookup_table()
         self._precalculate_overlay()
+        self._create_perspective_lookup_table()
+        self.last_frame_display = None # Store last good frame for display during waits
 
     def _precalculate_overlay(self):
         self.static_overlay = np.zeros((self.frame_height, self.frame_width, 3), dtype=np.uint8)
-        cv2.line(self.static_overlay, (self.roi_start_x, self.roi_top_y), (self.roi_start_x, self.roi_bottom_y), ROI_COLOR_BGR, 2)
-        cv2.line(self.static_overlay, (self.roi_end_x, self.roi_top_y), (self.roi_end_x, self.roi_bottom_y), ROI_COLOR_BGR, 2)
-        cv2.line(self.static_overlay, (self.roi_start_x, self.roi_bottom_y), (self.roi_end_x, self.roi_bottom_y), ROI_COLOR_BGR, 2)
-        cv2.line(self.static_overlay, (self.center_x_global, 0), (self.center_x_global, self.frame_height), CENTER_LINE_COLOR_BGR, 2)
+        # Draw ROI Box
+        cv2.rectangle(self.static_overlay, (self.roi_start_x, self.roi_top_y),
+                      (self.roi_end_x, self.roi_bottom_y), ROI_COLOR_BGR, 2)
+        # Draw Center Line
+        cv2.line(self.static_overlay, (self.center_x_global, 0), (self.center_x_global, self.frame_height), CENTER_LINE_COLOR_BGR, 1)
+        # Draw Center Detection Zone (thicker representation)
+        center_zone_rect = np.zeros_like(self.static_overlay)
+        cv2.rectangle(center_zone_rect, (self.center_line_start_x, 0),
+                      (self.center_line_end_x, self.frame_height), CENTER_LINE_COLOR_BGR, -1) # Filled rectangle
+        # Blend the center zone with the main overlay
+        self.static_overlay = cv2.addWeighted(self.static_overlay, 1.0, center_zone_rect, 0.2, 0) # Adjust alpha for visibility
+
         self.instruction_text = "SPACE: Toggle Count | D: Debug | Q/ESC: Quit"
+        # Add text for waiting state
+        self.waiting_text_org = (int(self.frame_width * 0.3), int(self.frame_height * 0.5))
+        self.waiting_text_font = cv2.FONT_HERSHEY_SIMPLEX
+        self.waiting_text_scale = 1.0
+        self.waiting_text_color = (0, 0, 255) # Red
+        self.waiting_text_thickness = 2
+
 
     def _create_perspective_lookup_table(self):
+        """Pre-calculates cm/pixel ratio for different y-coordinates in the ROI."""
         self.perspective_lookup_px_to_cm = {}
-        for y_in_roi_rounded in range(0, self.roi_height_px + 1, 10): # step by 10px
-            self.perspective_lookup_px_to_cm[y_in_roi_rounded] = self._get_pixel_to_cm_ratio(y_in_roi_rounded + self.roi_top_y)
+        # Step by 5 pixels for finer granularity
+        for y_in_roi_rounded in range(0, self.roi_height_px + 1, 5):
+            # y_global corresponds to the center of this 5px band within the ROI
+            y_global_center = self.roi_top_y + y_in_roi_rounded + 2.5
+            self.perspective_lookup_px_to_cm[y_in_roi_rounded] = self._get_pixel_to_cm_ratio(y_global_center)
 
     def _get_pixel_to_cm_ratio(self, y_global):
-        # 原本的透視校正方法 (保持向後兼容性)
-        y_eff = min(y_global, self.roi_bottom_y) 
-        
-        if self.roi_bottom_y == 0:
-            relative_y = 0.5
-        else:
-            relative_y = np.clip(y_eff / self.roi_bottom_y, 0.0, 1.0)
+        """Calculates estimated cm per pixel at a given global y-coordinate."""
+        # Ensure y_global is within reasonable bounds for calculation
+        y_eff = np.clip(y_global, 0, self.frame_height)
 
-        current_width_cm = self.far_side_width_cm * (1 - relative_y) + self.near_side_width_cm * relative_y
-        
-        roi_width_px = self.roi_end_x - self.roi_start_x
-        if current_width_cm > 0:
-            pixel_to_cm_ratio = current_width_cm / roi_width_px
+        # Relative position: 0 at frame top (far), 1 at roi_bottom_y (near perspective reference)
+        if self.roi_bottom_y <= 0: # Avoid division by zero
+             relative_y = 0.5
         else:
-            pixel_to_cm_ratio = self.table_length_cm / self.frame_width
-        
-        return pixel_to_cm_ratio
+             # Use roi_bottom_y as the reference point for 'near'
+             relative_y = np.clip(y_eff / self.roi_bottom_y, 0.0, 1.0)
+
+        # Linear interpolation of width between far and near sides
+        current_width_cm = self.far_side_width_cm * (1 - relative_y) + self.near_side_width_cm * relative_y
+
+        # Calculate cm per pixel based on the interpolated width across the ROI width in pixels
+        if current_width_cm > 0 and self.roi_width_px > 0:
+             # This ratio represents cm per HORIZONTAL pixel at this depth (y)
+             cm_per_pixel_horizontal = current_width_cm / self.roi_width_px
+        else:
+             # Fallback: Use nominal table length / frame width (less accurate)
+             cm_per_pixel_horizontal = self.table_length_cm / self.frame_width if self.frame_width > 0 else 0.1
+
+        # *** Assumption: Assuming the cm/pixel ratio is roughly isotropic (same for x and y movement at this depth) ***
+        # This is a simplification. True perspective correction is more complex.
+        # We return the horizontal ratio, assuming it applies reasonably well to diagonal movement too.
+        return cm_per_pixel_horizontal
 
     def _update_display_fps(self):
-        if self.use_video_file:
-            self.display_fps = self.actual_fps
-            return
-
+        # Always use monotonic clock for measuring frame processing rate
         now = time.monotonic()
         self.frame_timestamps_for_fps.append(now)
+
+        # Calculate FPS based on the time elapsed over the stored timestamps
         if len(self.frame_timestamps_for_fps) >= 2:
             elapsed_time = self.frame_timestamps_for_fps[-1] - self.frame_timestamps_for_fps[0]
-            if elapsed_time > 0:
+            if elapsed_time > 1e-9: # Avoid division by zero
+                # Calculate FPS over the interval covered by the deque
                 measured_fps = (len(self.frame_timestamps_for_fps) - 1) / elapsed_time
-                self.display_fps = (1 - FPS_SMOOTHING_FACTOR) * self.display_fps + FPS_SMOOTHING_FACTOR * measured_fps
-        self.last_frame_timestamp_for_fps = now
+                # Apply smoothing
+                # Use self.actual_fps (from reader) as initial baseline if display_fps is 0
+                current_base = self.display_fps if self.display_fps > 0 else self.actual_fps
+                self.display_fps = (1 - FPS_SMOOTHING_FACTOR) * current_base + FPS_SMOOTHING_FACTOR * measured_fps
+            # else: handle case of zero elapsed time if necessary, maybe decay FPS?
 
     def _preprocess_frame(self, frame):
+        # ROI slicing (this creates a view, modifications affect original frame)
         roi_sub_frame = frame[self.roi_top_y:self.roi_bottom_y, self.roi_start_x:self.roi_end_x]
         gray_roi = cv2.cvtColor(roi_sub_frame, cv2.COLOR_BGR2GRAY)
-        
+
+        # Gaussian blur reduces noise before differencing
         gray_roi_blurred = cv2.GaussianBlur(gray_roi, (5, 5), 0)
+
+        # Store the blurred frame for FMO calculation
         self.prev_frames_gray_roi.append(gray_roi_blurred)
+
+        # Return the original ROI view (for drawing) and the processed gray ROI
         return roi_sub_frame, gray_roi_blurred
 
     def _detect_fmo(self):
         if len(self.prev_frames_gray_roi) < 3:
-            return None
-        
+            return None # Need at least 3 frames for this FMO method
+
+        # Get the last 3 frames
         f1, f2, f3 = self.prev_frames_gray_roi[-3], self.prev_frames_gray_roi[-2], self.prev_frames_gray_roi[-1]
-        
+
+        # Calculate differences
         diff1 = cv2.absdiff(f1, f2)
         diff2 = cv2.absdiff(f2, f3)
         motion_mask = cv2.bitwise_and(diff1, diff2)
-        
+
+        # Thresholding (OTSU is good for contrast, but fallback needed)
         try:
             _, thresh_mask = cv2.threshold(motion_mask, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
-        except cv2.error:
+        except cv2.error: # Handle cases where OTSU might fail (e.g., uniform image)
             _, thresh_mask = cv2.threshold(motion_mask, THRESHOLD_VALUE_FMO, 255, cv2.THRESH_BINARY)
-        
-        if OPENING_KERNEL_SIZE_FMO[0] > 0:
+
+        # Morphological operations to clean up the mask
+        if self.opening_kernel.shape[0] > 0: # Avoid error if kernel size is (0,0)
             opened_mask = cv2.morphologyEx(thresh_mask, cv2.MORPH_OPEN, self.opening_kernel)
         else:
             opened_mask = thresh_mask
-        
-        closed_mask = cv2.morphologyEx(opened_mask, cv2.MORPH_CLOSE, self.closing_kernel)
+
+        if self.closing_kernel.shape[0] > 0:
+             closed_mask = cv2.morphologyEx(opened_mask, cv2.MORPH_CLOSE, self.closing_kernel)
+        else:
+             closed_mask = opened_mask
+
         return closed_mask
 
     def _detect_ball_in_roi(self, motion_mask_roi):
-        num_labels, labels, stats, centroids = cv2.connectedComponentsWithStats(motion_mask_roi, connectivity=8)
-        
+        """Detects ball candidates in the ROI using connected components."""
+        contours, _ = cv2.findContours(motion_mask_roi, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+
         potential_balls = []
-        for i in range(1, num_labels):
-            area = stats[i, cv2.CC_STAT_AREA]
+        current_timestamp = time.monotonic() # Use monotonic time for detection timestamp
+
+        for i, cnt in enumerate(contours):
+            area = cv2.contourArea(cnt)
+
             if MIN_BALL_AREA_PX < area < MAX_BALL_AREA_PX:
-                x_roi = stats[i, cv2.CC_STAT_LEFT]
-                y_roi = stats[i, cv2.CC_STAT_TOP]
-                w_roi = stats[i, cv2.CC_STAT_WIDTH]
-                h_roi = stats[i, cv2.CC_STAT_HEIGHT]
-                cx_roi, cy_roi = centroids[i]
-                
+                # Calculate moments to find centroid
+                M = cv2.moments(cnt)
+                if M["m00"] != 0:
+                    cx_roi = int(M["m10"] / M["m00"])
+                    cy_roi = int(M["m01"] / M["m00"])
+                else:
+                    # Fallback if moment is zero (shouldn't happen for valid contours)
+                    (cx_roi, cy_roi), _ = cv2.minEnclosingCircle(cnt)
+                    cx_roi, cy_roi = int(cx_roi), int(cy_roi)
+
+                # Calculate circularity using perimeter
+                perimeter = cv2.arcLength(cnt, True)
                 circularity = 0
-                if max(w_roi, h_roi) > 0:
-                    component_mask = (labels == i).astype(np.uint8) * 255
-                    contours, _ = cv2.findContours(component_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-                    if contours:
-                        cnt = contours[0]
-                        perimeter = cv2.arcLength(cnt, True)
-                        if perimeter > 0:
-                            circularity = 4 * math.pi * area / (perimeter * perimeter)
-                    
+                if perimeter > 0:
+                    circularity = 4 * math.pi * area / (perimeter * perimeter)
+
+                # Store candidate info
                 potential_balls.append({
-                    'position_roi': (int(cx_roi), int(cy_roi)),
+                    'position_roi': (cx_roi, cy_roi),
                     'area': area,
                     'circularity': circularity,
-                    'label_id': i,
-                    'contour_roi': contours[0] if contours else None
+                    'contour_roi': cnt # Store the contour itself
                 })
 
         if not potential_balls: return None, None
 
+        # Select the best candidate based on criteria
         best_ball_info = self._select_best_ball_candidate(potential_balls)
         if not best_ball_info: return None, None
 
         cx_roi, cy_roi = best_ball_info['position_roi']
+        # Convert ROI coordinates to global frame coordinates
         cx_global = cx_roi + self.roi_start_x
         cy_global = cy_roi + self.roi_top_y
-        
-        current_timestamp = time.monotonic()
-        if self.use_video_file:
-            current_timestamp = self.frame_counter / self.actual_fps
-        
+
+        # Update last detection system time (used for timeout)
         self.last_detection_timestamp = time.monotonic()
-        
-        # 記錄球體面積，用於球體大小校正
-        self.last_ball_area = best_ball_info['area']
-        
+
+        # --- Call crossing check ---
+        # Pass the current ball position and its corresponding timestamp
         if self.is_counting_active:
-            self.check_center_crossing(cx_global, current_timestamp, self.last_ball_area)
-        
+            # check_center_crossing now handles interpolation using last_ball_timestamp
+            self.check_center_crossing(cx_global, current_timestamp) # Pass monotonic time
+
+
+        # Add to trajectory (global coords, monotonic time)
         self.trajectory.append((cx_global, cy_global, current_timestamp))
-        
+
         if self.debug_mode:
             print(f"Ball: ROI({cx_roi},{cy_roi}), Global({cx_global},{cy_global}), Area:{best_ball_info['area']:.1f}, Circ:{best_ball_info['circularity']:.3f}")
-        
+
+        # Return position and contour relative to ROI for drawing
         return best_ball_info['position_roi'], best_ball_info.get('contour_roi')
 
     def _select_best_ball_candidate(self, candidates):
+        """Selects the most likely ball from candidates based on circularity, proximity, and consistency."""
         if not candidates: return None
 
-        if not self.trajectory:
-            highly_circular = [b for b in candidates if b['circularity'] > MIN_BALL_CIRCULARITY]
-            if highly_circular:
-                return max(highly_circular, key=lambda b: b['circularity'])
-            return max(candidates, key=lambda b: b['area'])
+        # Filter by minimum circularity first
+        plausible_balls = [b for b in candidates if b['circularity'] >= MIN_BALL_CIRCULARITY]
+        if not plausible_balls:
+            # If none meet circularity, maybe relax slightly or return largest?
+            # For now, let's stick to the circularity requirement.
+             # Or fallback: return max(candidates, key=lambda b: b['area'])
+            return None # No sufficiently circular candidates found
 
-        last_x_global, last_y_global, _ = self.trajectory[-1]
+        # If only one plausible candidate, return it
+        if len(plausible_balls) == 1:
+            return plausible_balls[0]
 
-        for ball_info in candidates:
-            cx_roi, cy_roi = ball_info['position_roi']
-            cx_global = cx_roi + self.roi_start_x
-            cy_global = cy_roi + self.roi_top_y
+        # If trajectory exists, score based on proximity and motion consistency
+        if self.trajectory:
+            last_x_global, last_y_global, _ = self.trajectory[-1]
 
-            distance = math.hypot(cx_global - last_x_global, cy_global - last_y_global)
-            ball_info['distance_from_last'] = distance
-            
-            if distance > self.frame_width * 0.2:
-                ball_info['distance_from_last'] = float('inf')
+            for ball_info in plausible_balls:
+                cx_roi, cy_roi = ball_info['position_roi']
+                cx_global = cx_roi + self.roi_start_x
+                cy_global = cy_roi + self.roi_top_y
 
-            consistency_score = 0
-            if len(self.trajectory) >= 2:
-                prev_x_global, prev_y_global, _ = self.trajectory[-2]
-                vec_hist_dx = last_x_global - prev_x_global
-                vec_hist_dy = last_y_global - prev_y_global
-                vec_curr_dx = cx_global - last_x_global
-                vec_curr_dy = cy_global - last_y_global
+                # Distance from last known position
+                distance = math.hypot(cx_global - last_x_global, cy_global - last_y_global)
+                ball_info['distance_from_last'] = distance
 
-                dot_product = vec_hist_dx * vec_curr_dx + vec_hist_dy * vec_curr_dy
-                mag_hist = math.sqrt(vec_hist_dx**2 + vec_hist_dy**2)
-                mag_curr = math.sqrt(vec_curr_dx**2 + vec_curr_dy**2)
+                # Motion consistency score (using cosine similarity with previous vector)
+                consistency_score = 0
+                if len(self.trajectory) >= 2:
+                    prev_x_global, prev_y_global, _ = self.trajectory[-2]
+                    vec_hist_dx = last_x_global - prev_x_global
+                    vec_hist_dy = last_y_global - prev_y_global
+                    vec_curr_dx = cx_global - last_x_global
+                    vec_curr_dy = cy_global - last_y_global
 
-                if mag_hist > 0 and mag_curr > 0:
-                    cosine_similarity = dot_product / (mag_hist * mag_curr)
-                    consistency_score = max(0, cosine_similarity)
-            ball_info['consistency'] = consistency_score
-        
-        for ball_info in candidates:
-            score = (0.4 / (1.0 + ball_info['distance_from_last'])) + \
-                    (0.4 * ball_info['consistency']) + \
-                    (0.2 * ball_info['circularity'])
-            ball_info['score'] = score
-        
-        return max(candidates, key=lambda b: b['score'])
+                    mag_hist_sq = vec_hist_dx**2 + vec_hist_dy**2
+                    mag_curr_sq = vec_curr_dx**2 + vec_curr_dy**2
+
+                    if mag_hist_sq > 1e-6 and mag_curr_sq > 1e-6: # Avoid division by zero / sqrt(0)
+                        dot_product = vec_hist_dx * vec_curr_dx + vec_hist_dy * vec_curr_dy
+                        cosine_similarity = dot_product / (math.sqrt(mag_hist_sq) * math.sqrt(mag_curr_sq))
+                        consistency_score = max(0, cosine_similarity) # Penalize direction changes > 90deg
+                ball_info['consistency'] = consistency_score
+
+                # Combined Score (adjust weights as needed)
+                # Lower distance is better -> use inverse or similar
+                # Higher consistency is better
+                # Higher circularity is better (already filtered, but can still weigh)
+                score = (0.5 * ball_info['consistency']) + \
+                        (0.3 * ball_info['circularity']) + \
+                        (0.2 / (1.0 + distance)) # Weight proximity less if consistency/circ are high
+                ball_info['score'] = score
+
+            # Return the candidate with the highest score
+            return max(plausible_balls, key=lambda b: b['score'])
+        else:
+            # No trajectory history, return the most circular among the plausible ones
+            return max(plausible_balls, key=lambda b: b['circularity'])
+
 
     def toggle_counting(self):
         self.is_counting_active = not self.is_counting_active
@@ -807,516 +570,783 @@ class PingPongSpeedTracker:
             self.first_ball_crossing_timestamp = None
             self.event_buffer_center_cross.clear()
             self.output_generated_for_session = False
+            # Clear previous trajectory and speed when starting new count? Optional.
+            # self.trajectory.clear()
+            # self.current_ball_speed_kmh = 0
+            self.last_ball_x_global = None # Reset last position for crossing check
+            self.last_ball_timestamp = None # Reset last timestamp
             print(f"Counting ON (Session #{self.count_session_id}) - Target: {self.max_net_speeds_to_collect} speeds.")
         else:
             print(f"Counting OFF (Session #{self.count_session_id}).")
+            # Generate output if counting is turned off and data exists
             if self.collected_net_speeds and not self.output_generated_for_session:
                 print(f"Collected {len(self.collected_net_speeds)} speeds. Generating output...")
                 self._generate_outputs_async()
-            self.output_generated_for_session = True
+            self.output_generated_for_session = True # Mark as generated/handled for this session
 
-    def check_center_crossing(self, ball_x_global, current_timestamp, ball_area=None):
-        if self.last_ball_x_global is None:
+
+    def check_center_crossing(self, ball_x_global, current_timestamp):
+        """Checks for center line crossing using interpolation between the last and current point."""
+        if self.last_ball_x_global is None or self.last_ball_timestamp is None:
+            # Store current position and time as the "last" for the next frame
             self.last_ball_x_global = ball_x_global
+            self.last_ball_timestamp = current_timestamp
             return
 
-        time_since_last_net_cross = current_timestamp - self.last_net_crossing_detection_time
-        if time_since_last_net_cross < CENTER_DETECTION_COOLDOWN_S:
-            self.last_ball_x_global = ball_x_global
-            return
+        # --- Interpolation Check ---
+        recorded = self._check_and_record_crossing_interpolated(
+            self.last_ball_x_global,
+            ball_x_global,
+            self.last_ball_timestamp, # Timestamp of the previous ball detection
+            current_timestamp,       # Timestamp of the current ball detection
+            self.current_ball_speed_kmh # Use the latest calculated speed
+        )
 
-        self._record_potential_crossing(ball_x_global, current_timestamp, ball_area)
+        # --- Update Last Known State ---
+        # Always update the last known position and timestamp for the next frame's check
         self.last_ball_x_global = ball_x_global
+        self.last_ball_timestamp = current_timestamp
 
-    def _record_potential_crossing(self, ball_x_global, current_timestamp, ball_area=None):
-        crossed_l_to_r = (self.last_ball_x_global < self.center_line_end_x and ball_x_global >= self.center_line_end_x)
-        crossed_r_to_l = (self.last_ball_x_global > self.center_line_start_x and ball_x_global <= self.center_line_start_x)
-        
-        actual_crossing_detected = False
-        if self.net_crossing_direction == 'left_to_right' and crossed_l_to_r: actual_crossing_detected = True
-        elif self.net_crossing_direction == 'right_to_left' and crossed_r_to_l: actual_crossing_detected = True
-        elif self.net_crossing_direction == 'both' and (crossed_l_to_r or crossed_r_to_l): actual_crossing_detected = True
+        # --- Optional: Prediction Logic (Can be called here if needed) ---
+        # If you still want predictions for events far in the future, you could call
+        # a separate prediction function here, perhaps only if `recorded` is False.
+        # self._predict_crossing(...)
 
-        if actual_crossing_detected and self.current_ball_speed_kmh > 0:
-            event = EventRecord(ball_x_global, current_timestamp, self.current_ball_speed_kmh, predicted=False, ball_area=ball_area)
-            self.event_buffer_center_cross.append(event)
-            return
 
-        if len(self.trajectory) >= 2 and self.current_ball_speed_kmh > 0:
-            pt1_x, _, pt1_t = self.trajectory[-2]
-            pt2_x, _, pt2_t = self.trajectory[-1]
-            delta_t = pt2_t - pt1_t
-            if delta_t > 0:
-                vx_pixels_per_time_unit = (pt2_x - pt1_x) / delta_t
-                
-                prediction_horizon_time = PREDICTION_LOOKAHEAD_FRAMES / self.display_fps if self.display_fps > 0 else 0.1
-                
-                predicted_x_future = ball_x_global + vx_pixels_per_time_unit * prediction_horizon_time
-                predicted_timestamp_future = current_timestamp + prediction_horizon_time
+    def _check_and_record_crossing_interpolated(self, last_x, current_x, last_t, current_t, current_speed_kmh):
+        """
+        Checks if the line segment (last_pos -> current_pos) crosses the center zone.
+        If yes, interpolates the time and records the event using current speed.
+        Returns True if an event was recorded, False otherwise.
+        """
+        # Basic validation: need valid points and time difference
+        if last_x is None or current_t <= last_t:
+            return False
 
-                predict_l_to_r = (ball_x_global < self.center_x_global and predicted_x_future >= self.center_x_global)
-                predict_r_to_l = (ball_x_global > self.center_x_global and predicted_x_future <= self.center_x_global)
-                
-                prediction_valid_for_direction = False
-                if self.net_crossing_direction == 'left_to_right' and predict_l_to_r: prediction_valid_for_direction = True
-                elif self.net_crossing_direction == 'right_to_left' and predict_r_to_l: prediction_valid_for_direction = True
-                elif self.net_crossing_direction == 'both' and (predict_l_to_r or predict_r_to_l): prediction_valid_for_direction = True
+        # Check cooldown based on the *last actual recorded event time*
+        time_since_last_event = current_t - self.last_net_crossing_detection_time
+        if time_since_last_event < CENTER_DETECTION_COOLDOWN_S:
+            return False # Still cooling down from the last recorded crossing
 
-                if prediction_valid_for_direction:
-                    can_add_prediction = True
-                    for ev in self.event_buffer_center_cross:
-                        if ev.predicted and abs(ev.timestamp - predicted_timestamp_future) < 0.1:
-                            can_add_prediction = False
-                            break
-                    if can_add_prediction:
-                        event = EventRecord(predicted_x_future, predicted_timestamp_future, self.current_ball_speed_kmh, predicted=True, ball_area=ball_area)
-                        self.event_buffer_center_cross.append(event)
+        crossed_center = False
+        crossing_direction = None
+        intersection_line_x = None # Which line (start or end) was crossed
+        fraction = 0.5 # Default fraction
+
+        # Scenario 1: Crossing the end line (typically L -> R)
+        # Check if the segment potentially crosses the right boundary of the zone
+        if last_x < self.center_line_end_x and current_x >= self.center_line_end_x:
+             # Ensure the segment has non-zero x-movement to avoid division by zero
+             dx = current_x - last_x
+             if abs(dx) > 1e-6:
+                  crossed_center = True
+                  crossing_direction = 'left_to_right'
+                  intersection_line_x = self.center_line_end_x
+                  # Calculate fraction of segment before crossing the END line
+                  fraction = (self.center_line_end_x - last_x) / dx
+
+        # Scenario 2: Crossing the start line (typically R -> L)
+        # Check if the segment potentially crosses the left boundary of the zone
+        elif last_x > self.center_line_start_x and current_x <= self.center_line_start_x:
+             dx = current_x - last_x
+             if abs(dx) > 1e-6:
+                  crossed_center = True
+                  crossing_direction = 'right_to_left'
+                  intersection_line_x = self.center_line_start_x
+                  # Calculate fraction of segment before crossing the START line
+                  fraction = (self.center_line_start_x - last_x) / dx
+
+        # If a crossing matching the desired direction occurred
+        if crossed_center and (self.net_crossing_direction == 'both' or self.net_crossing_direction == crossing_direction):
+
+            # Ensure speed is valid
+            if current_speed_kmh <= 0:
+                if self.debug_mode: print(f"Crossing {crossing_direction} detected but speed ({current_speed_kmh:.1f}) is zero/negative. Ignoring.")
+                return False # Don't record events with zero or negative speed
+
+            # Interpolate the time of crossing
+            # Clamp fraction to [0, 1] just in case, although it should be within this range
+            fraction = max(0.0, min(1.0, fraction))
+            interpolated_time = last_t + fraction * (current_t - last_t)
+
+            # --- Duplicate Check ---
+            # Check if this interpolated event is too close to an existing event in the buffer
+            is_duplicate = False
+            # Use a slightly larger window for duplicate check than cooldown? Maybe 1.5x cooldown.
+            duplicate_check_window = CENTER_DETECTION_COOLDOWN_S * 1.5
+            for ev in self.event_buffer_center_cross:
+                 # Check timestamp and also ensure speed is somewhat similar? (Optional)
+                 if abs(ev.timestamp - interpolated_time) < duplicate_check_window:
+                     is_duplicate = True
+                     if self.debug_mode: print(f"Duplicate crossing event detected near {interpolated_time:.3f}. Ignoring.")
+                     break
+
+            if not is_duplicate:
+                # Record the event with interpolated time and current speed
+                event = EventRecord(intersection_line_x, # Record crossing at the line edge
+                                    interpolated_time,
+                                    current_speed_kmh,
+                                    predicted=False) # This is an actual (interpolated) event
+                self.event_buffer_center_cross.append(event)
+
+                # IMPORTANT: Update the last *recorded event* timestamp - used for cooldown
+                self.last_net_crossing_detection_time = interpolated_time
+
+                if self.debug_mode:
+                    print(f"Interpolated Crossing Recorded: {crossing_direction} at t={interpolated_time:.3f}s, Speed={current_speed_kmh:.1f} km/h")
+                return True # Event recorded
+
+        return False # No valid crossing recorded in this check
+
 
     def _process_crossing_events(self):
+        """Processes events from the buffer, adds them to the collected list if valid."""
         if not self.is_counting_active or self.output_generated_for_session:
             return
 
-        current_eval_time = time.monotonic()
-        if self.use_video_file: current_eval_time = self.frame_counter / self.actual_fps
-        
+        # Process events from the buffer one by one
+        processed_count = 0
         events_to_commit = []
-        
-        processed_indices = []
-        for i, event in enumerate(self.event_buffer_center_cross):
-            if event.processed: continue
-            if not event.predicted:
-                events_to_commit.append(event)
-                event.processed = True
-                for j, other_event in enumerate(self.event_buffer_center_cross):
-                    if i !=j and other_event.predicted and not other_event.processed and \
-                       abs(event.timestamp - other_event.timestamp) < 0.2:
-                        other_event.processed = True
 
-        for event in self.event_buffer_center_cross:
-            if event.processed: continue
-            if event.predicted and (current_eval_time - event.timestamp) > 0.1:
-                events_to_commit.append(event)
-                event.processed = True
+        # Iterate through a copy or manage indices carefully if modifying deque during iteration
+        temp_buffer = list(self.event_buffer_center_cross) # Work on a temporary list
 
-        events_to_commit.sort(key=lambda e: e.timestamp)
+        indices_to_remove = []
 
-        for event in events_to_commit:
+        for i, event in enumerate(temp_buffer):
+            if event.processed: # Already handled in a previous cycle? Should not happen if removed properly.
+                # This might happen if processing is slow and events build up faster than processed
+                # Mark for removal anyway
+                indices_to_remove.append(i)
+                continue
+
+            # Check if we've reached the target count
             if len(self.collected_net_speeds) >= self.max_net_speeds_to_collect:
-                break
+                # Once target is reached, we should stop adding new events.
+                # We can break here, leaving unprocessed events in the buffer.
+                # They will be cleared next time counting is toggled ON.
+                break # Stop processing if limit reached
 
-            if not self.timing_started_for_session:
-                self.timing_started_for_session = True
-                self.first_ball_crossing_timestamp = event.timestamp
-                relative_time = 0.0
-            else:
-                relative_time = round(event.timestamp - self.first_ball_crossing_timestamp, 2)
-            
-            self.last_recorded_net_speed_kmh = event.speed_kmh
-            self.collected_net_speeds.append(event.speed_kmh)
-            self.collected_relative_times.append(relative_time)
-            self.last_net_crossing_detection_time = event.timestamp
-            
-            status_msg = "預測" if event.predicted else "實際"
-            ball_area_msg = f", 球體面積={event.ball_area:.0f}" if event.ball_area and self.debug_mode else ""
-            print(f"Net Speed #{len(self.collected_net_speeds)}: {event.speed_kmh:.1f} km/h @ {relative_time:.2f}s ({status_msg}{ball_area_msg})")
+            # Mark event as processed *before* adding to commit list
+            # This prevents it being added again if loop iterates strangely
+            event.processed = True
+            indices_to_remove.append(i) # Mark for removal from original deque later
 
-        self.event_buffer_center_cross = deque(
-            [e for e in self.event_buffer_center_cross if not e.processed],
-            maxlen=EVENT_BUFFER_SIZE_CENTER_CROSS
-        )
+            # Commit this event
+            events_to_commit.append(event)
+            processed_count += 1
 
+        # --- Remove processed events from the actual deque ---
+        # Rebuild the deque to ensure atomicity and avoid issues with modifying during iteration
+        if indices_to_remove:
+            new_buffer_list = []
+            current_indices_set = set(range(len(temp_buffer)))
+            processed_indices_set = set(indices_to_remove)
+            indices_to_keep = sorted(list(current_indices_set - processed_indices_set))
+
+            for idx in indices_to_keep:
+                 new_buffer_list.append(temp_buffer[idx])
+
+            self.event_buffer_center_cross = deque(new_buffer_list, maxlen=EVENT_BUFFER_SIZE_CENTER_CROSS)
+
+
+        # --- Add committed events to the session's results ---
+        if events_to_commit:
+            # Sort events by timestamp before adding to results (important for relative time)
+            events_to_commit.sort(key=lambda e: e.timestamp)
+
+            for event in events_to_commit:
+                 # Double check count again in case multiple events processed at once
+                if len(self.collected_net_speeds) >= self.max_net_speeds_to_collect:
+                    break
+
+                # Calculate relative time
+                if not self.timing_started_for_session:
+                    self.timing_started_for_session = True
+                    # Use the timestamp of the *first committed event* in this batch as the start
+                    self.first_ball_crossing_timestamp = event.timestamp
+                    relative_time = 0.0
+                else:
+                    # Ensure first_ball_crossing_timestamp is not None
+                    if self.first_ball_crossing_timestamp is not None:
+                        relative_time = round(event.timestamp - self.first_ball_crossing_timestamp, 2)
+                    else:
+                         # Fallback if first timestamp wasn't set (shouldn't happen)
+                         relative_time = 0.0
+                         if self.debug_mode: print("Warning: First crossing timestamp not set for relative time calc.")
+
+
+                self.last_recorded_net_speed_kmh = event.speed_kmh
+                self.collected_net_speeds.append(event.speed_kmh)
+                self.collected_relative_times.append(relative_time)
+
+                # Update last crossing detection time - already done in _check_and_record_crossing_interpolated
+                # self.last_net_crossing_detection_time = event.timestamp
+
+                status_msg = "Pred" if event.predicted else "Actual" # Should mostly be Actual now
+                print(f"Net Speed #{len(self.collected_net_speeds)}: {event.speed_kmh:.1f} km/h @ {relative_time:.2f}s ({status_msg})")
+
+        # Check if target count is reached *after* processing events for this frame
         if len(self.collected_net_speeds) >= self.max_net_speeds_to_collect and not self.output_generated_for_session:
             print(f"Target {self.max_net_speeds_to_collect} speeds collected. Generating output.")
             self._generate_outputs_async()
             self.output_generated_for_session = True
             if AUTO_STOP_AFTER_COLLECTION:
-                self.is_counting_active = False
+                print("Auto-stopping count.")
+                self.is_counting_active = False # Optionally stop counting
+
 
     def _calculate_ball_speed(self):
-        if len(self.trajectory) < 2:
-            self.current_ball_speed_kmh = 0
+        """Calculates ball speed using recent trajectory points, applying perspective correction."""
+        # Use at least 2 points, up to SPEED_CALC_POINTS
+        num_traj_points = len(self.trajectory)
+        points_to_use = min(num_traj_points, SPEED_CALC_POINTS)
+
+        if points_to_use < 2:
+            # Not enough points, potentially decay speed slightly or set to zero
+            self.current_ball_speed_kmh *= (1 - SPEED_SMOOTHING_FACTOR * 0.5) # Slower decay
+            if self.current_ball_speed_kmh < 0.1 : self.current_ball_speed_kmh = 0
             return
 
-        p1_glob, p2_glob = self.trajectory[-2], self.trajectory[-1]
-        x1_glob, y1_glob, t1 = p1_glob
-        x2_glob, y2_glob, t2 = p2_glob
+        # Select the first and last point from the most recent 'points_to_use'
+        segment_points = list(self.trajectory)[-points_to_use:]
+        pt_start_glob = segment_points[0]
+        pt_end_glob = segment_points[-1]
 
-        # 使用先進的透視校正計算實際距離，包含深度校正
-        dist_cm = self.perspective_corrector.get_real_distance(
-            x1_glob, y1_glob, x2_glob, y2_glob, self.last_ball_area
-        )
-        
+        x1_glob, y1_glob, t1 = pt_start_glob
+        x2_glob, y2_glob, t2 = pt_end_glob
+
         delta_t = t2 - t1
-        if delta_t > 0:
-            speed_cm_per_time_unit = dist_cm / delta_t
-            speed_kmh = speed_cm_per_time_unit * KMH_CONVERSION_FACTOR 
-            
+
+        if delta_t > 1e-9: # Ensure time has passed
+            # Calculate real-world distance using perspective correction
+            dist_cm = self._calculate_real_distance_cm_global(x1_glob, y1_glob, x2_glob, y2_glob)
+
+            # Speed in cm/s (assuming time is in seconds from monotonic())
+            speed_cm_per_sec = dist_cm / delta_t
+            # Convert cm/s to km/h
+            speed_kmh = speed_cm_per_sec * KMH_CONVERSION_FACTOR
+
+            # Apply smoothing filter
             if self.current_ball_speed_kmh > 0:
                 self.current_ball_speed_kmh = (1 - SPEED_SMOOTHING_FACTOR) * self.current_ball_speed_kmh + \
                                            SPEED_SMOOTHING_FACTOR * speed_kmh
             else:
+                # If previous speed was zero, initialize directly
                 self.current_ball_speed_kmh = speed_kmh
-            
-            if self.debug_mode:
-                correction_info = self.perspective_corrector.last_correction_info
-                raw_dist = correction_info.get('raw_distance_cm', 0)
-                corr_dist = correction_info.get('corrected_distance_cm', 0)
-                corr_factor = correction_info.get('correction', 1.0)
-                depth_factor = correction_info.get('depth_factor', 0)
-                print(f"Speed: 原始距離={raw_dist:.2f}cm, 校正距離={corr_dist:.2f}cm (x{corr_factor:.2f}, 深度因子={depth_factor:.2f}), 時間={delta_t:.4f}s -> 速度={speed_kmh:.1f}km/h")
+
+            if self.debug_mode and self.frame_counter % 10 == 0: # Print speed debug less often
+                 print(f"Speed Calc ({points_to_use} pts): {dist_cm:.2f}cm in {delta_t:.4f}s -> Raw {speed_kmh:.1f}km/h, Smooth {self.current_ball_speed_kmh:.1f}km/h")
         else:
-            self.current_ball_speed_kmh *= (1 - SPEED_SMOOTHING_FACTOR)
+            # No time difference, decay speed
+            self.current_ball_speed_kmh *= (1 - SPEED_SMOOTHING_FACTOR * 0.5)
+            if self.current_ball_speed_kmh < 0.1 : self.current_ball_speed_kmh = 0
+
 
     def _calculate_real_distance_cm_global(self, x1_g, y1_g, x2_g, y2_g):
-        """
-        原始方法保留但不使用，已被新的透視校正取代
-        這裡保留代碼是為了向後兼容性
-        """
-        y1_roi = y1_g - self.roi_top_y
-        y2_roi = y2_g - self.roi_top_y
+        """Calculates estimated real-world distance in cm between two global points using perspective lookup."""
+        # Find the corresponding y-coordinates within the ROI's perspective model
+        # Use the y-coordinate relative to the top of the frame for perspective lookup
+        # Find the nearest pre-calculated y-band in the lookup table
+        y1_lookup = round((y1_g - self.roi_top_y) / 5) * 5 # Find closest 5px band in lookup
+        y2_lookup = round((y2_g - self.roi_top_y) / 5) * 5
 
-        y1_roi_rounded = round(y1_roi / 10) * 10
-        y2_roi_rounded = round(y2_roi / 10) * 10
-        
-        ratio1 = self.perspective_lookup_px_to_cm.get(y1_roi_rounded, self._get_pixel_to_cm_ratio(y1_g))
-        ratio2 = self.perspective_lookup_px_to_cm.get(y2_roi_rounded, self._get_pixel_to_cm_ratio(y2_g))
-        
-        avg_px_to_cm_ratio = (ratio1 + ratio2) / 2.0
-        
+        # Clamp lookup keys to be within the valid range of the pre-calculated table
+        y1_lookup = max(0, min(self.roi_height_px, y1_lookup))
+        y2_lookup = max(0, min(self.roi_height_px, y2_lookup))
+
+
+        # Get cm/pixel ratios from the lookup table, fallback to direct calc if needed (should be rare with clamping)
+        cm_per_px_1 = self.perspective_lookup_px_to_cm.get(y1_lookup, self._get_pixel_to_cm_ratio(y1_g))
+        cm_per_px_2 = self.perspective_lookup_px_to_cm.get(y2_lookup, self._get_pixel_to_cm_ratio(y2_g))
+
+        # Use the average ratio for the segment
+        avg_cm_per_pixel = (cm_per_px_1 + cm_per_px_2) / 2.0
+
+        # Calculate pixel distance (hypotenuse)
         pixel_distance = math.hypot(x2_g - x1_g, y2_g - y1_g)
-        real_distance_cm = pixel_distance * avg_px_to_cm_ratio
+
+        # Convert pixel distance to real-world cm distance
+        real_distance_cm = pixel_distance * avg_cm_per_pixel
         return real_distance_cm
+
 
     def _generate_outputs_async(self):
         if not self.collected_net_speeds:
             print("No speed data to generate output.")
             return
-        
+
+        # Create copies for the thread to work on safely
         speeds_copy = list(self.collected_net_speeds)
         times_copy = list(self.collected_relative_times)
         session_id_copy = self.count_session_id
 
+        print(f"Submitting output generation task for session {session_id_copy}...")
         self.file_writer_executor.submit(self._create_output_files, speeds_copy, times_copy, session_id_copy)
 
     def _create_output_files(self, net_speeds, relative_times, session_id):
-        """This method runs in a separate thread via ThreadPoolExecutor."""
-        if not net_speeds: return
+        """Generates chart, TXT, and CSV files (runs in background thread)."""
+        try:
+            if not net_speeds:
+                print(f"[FileWriter] No speeds provided for session {session_id}.")
+                return
 
-        timestamp_str = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-        output_dir_path = f"{OUTPUT_DATA_FOLDER}/{timestamp_str}"
-        os.makedirs(output_dir_path, exist_ok=True)
+            timestamp_str = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+            # Include session ID in the folder name for clarity
+            output_dir_path = os.path.join(OUTPUT_DATA_FOLDER, f"{timestamp_str}")
+            os.makedirs(output_dir_path, exist_ok=True)
 
-        avg_speed = sum(net_speeds) / len(net_speeds)
-        max_speed = max(net_speeds)
-        min_speed = min(net_speeds)
+            avg_speed = sum(net_speeds) / len(net_speeds)
+            max_speed = max(net_speeds)
+            min_speed = min(net_speeds)
 
-        # Generate Chart
-        chart_filename = f'{output_dir_path}/speed_chart_{timestamp_str}.png'
-        plt.figure(figsize=(12, 7))
-        plt.plot(relative_times, net_speeds, 'o-', linewidth=2, markersize=6, label='Speed (km/h)')
-        plt.axhline(y=avg_speed, color='r', linestyle='--', label=f'Avg: {avg_speed:.1f} km/h')
-        for t, s in zip(relative_times, net_speeds):
-            plt.annotate(f"{s:.1f}", (t, s), textcoords="offset points", xytext=(0,10), ha='center', fontsize=8)
-        plt.title(f'Net Crossing Speeds - {timestamp_str}', fontsize=16)
-        plt.xlabel('Relative Time (s)', fontsize=12)
-        plt.ylabel('Speed (km/h)', fontsize=12)
-        plt.grid(True, linestyle=':', alpha=0.7)
-        plt.legend()
-        if relative_times:
-            x_margin = (max(relative_times) - min(relative_times)) * 0.05 if max(relative_times) > min(relative_times) else 0.5
-            plt.xlim(min(relative_times) - x_margin, max(relative_times) + x_margin)
-            y_range = max_speed - min_speed if max_speed > min_speed else 10
-            plt.ylim(min_speed - y_range*0.1, max_speed + y_range*0.1)
-        plt.figtext(0.02, 0.02, f"Count: {len(net_speeds)}, Max: {max_speed:.1f}, Min: {min_speed:.1f} km/h", fontsize=9)
-        plt.tight_layout(rect=[0, 0.03, 1, 0.95])
-        plt.savefig(chart_filename, dpi=150)
-        plt.close()
+            # --- Generate Chart ---
+            chart_filename = os.path.join(output_dir_path, f'speed_chart_{timestamp_str}.png')
+            plt.figure(figsize=(12, 7)) # Create a new figure for this thread
+            plt.plot(relative_times, net_speeds, 'o-', linewidth=2, markersize=6, label='Speed (km/h)')
+            plt.axhline(y=avg_speed, color='r', linestyle='--', label=f'Avg: {avg_speed:.1f} km/h')
 
-        # Generate TXT
-        txt_filename = f'{output_dir_path}/speed_data_{timestamp_str}.txt'
-        with open(txt_filename, 'w') as f:
-            f.write(f"Net Speeds - Session {session_id} - {timestamp_str}\n")
-            f.write("---------------------------------------\n")
-            for i, (t, s) in enumerate(zip(relative_times, net_speeds)):
-                f.write(f"{t:.2f}s: {s:.1f} km/h\n")
-            f.write("---------------------------------------\n")
-            f.write(f"Total Points: {len(net_speeds)}\n")
-            f.write(f"Average Speed: {avg_speed:.1f} km/h\n")
-            f.write(f"Maximum Speed: {max_speed:.1f} km/h\n")
-            f.write(f"Minimum Speed: {min_speed:.1f} km/h\n")
+            # --- Restore point annotations ---
+            for t, s in zip(relative_times, net_speeds):
+                plt.annotate(f"{s:.1f}", (t, s), textcoords="offset points", xytext=(0,10), ha='center', fontsize=9)
+            # --- End of restored section ---
 
-        # Generate CSV
-        csv_filename = f'{output_dir_path}/speed_data_{timestamp_str}.csv'
-        with open(csv_filename, 'w', newline='') as f:
-            writer = csv.writer(f)
-            writer.writerow(['Timestamp', 'Point Number', 'Relative Time (s)', 'Speed (km/h)'])
-            for i, (t, s) in enumerate(zip(relative_times, net_speeds)):
-                writer.writerow([timestamp_str, i+1, f"{t:.2f}", f"{s:.1f}"])
-            writer.writerow([])
-            writer.writerow(['Statistic', 'Value'])
-            writer.writerow(['Total Points', len(net_speeds)])
-            writer.writerow(['Average Speed (km/h)', f"{avg_speed:.1f}"])
-            writer.writerow(['Maximum Speed (km/h)', f"{max_speed:.1f}"])
-            writer.writerow(['Minimum Speed (km/h)', f"{min_speed:.1f}"])
-        
-        print(f"Output files saved to {output_dir_path}")
+            plt.title(f'Net Crossing Speeds - Session {session_id} ({timestamp_str})', fontsize=16)
+            plt.xlabel('Relative Time (s)', fontsize=12)
+            plt.ylabel('Speed (km/h)', fontsize=12)
+            plt.grid(True, linestyle=':', alpha=0.7)
+            plt.legend()
+            # Adjust plot limits for better visualization
+            if relative_times:
+                time_range = max(relative_times) - min(relative_times) if len(relative_times) > 1 else 1.0
+                x_margin = max(time_range * 0.05, 0.5) # Ensure some margin
+                plt.xlim(min(relative_times) - x_margin, max(relative_times) + x_margin)
 
-    def _draw_visualizations(self, display_frame, frame_data_obj: FrameData):
-        global DEPTH_CORRECTION_ENABLE
-        global BALL_SIZE_CORRECTION_ENABLE
-        
-        vis_frame = display_frame
-        
+                speed_range = max_speed - min_speed if max_speed > min_speed else 10.0
+                y_margin = max(speed_range * 0.1, 5.0) # Ensure some margin
+                plt.ylim(max(0, min_speed - y_margin), max_speed + y_margin) # Ensure y starts at 0 or below min speed
+
+            plt.figtext(0.02, 0.02, f"Count: {len(net_speeds)}, Max: {max_speed:.1f}, Min: {min_speed:.1f} km/h", fontsize=9)
+            plt.tight_layout(rect=[0, 0.03, 1, 0.95])
+            plt.savefig(chart_filename, dpi=150)
+            plt.close() # IMPORTANT: Close the figure to release memory
+            print(f"[FileWriter] Chart saved to {chart_filename}")
+
+            # --- Generate TXT ---
+            txt_filename = os.path.join(output_dir_path, f'speed_data_{timestamp_str}.txt')
+            with open(txt_filename, 'w') as f:
+                f.write(f"Net Speeds - Session {session_id} - {timestamp_str}\n")
+                f.write("---------------------------------------\n")
+                f.write("Point | Rel Time (s) | Speed (km/h)\n")
+                f.write("---------------------------------------\n")
+                for i, (t, s) in enumerate(zip(relative_times, net_speeds)):
+                    f.write(f"{i+1:<5} | {t:<12.2f} | {s:.1f}\n")
+                f.write("---------------------------------------\n")
+                f.write(f"Total Points: {len(net_speeds)}\n")
+                f.write(f"Average Speed: {avg_speed:.1f} km/h\n")
+                f.write(f"Maximum Speed: {max_speed:.1f} km/h\n")
+                f.write(f"Minimum Speed: {min_speed:.1f} km/h\n")
+            print(f"[FileWriter] TXT saved to {txt_filename}")
+
+            # --- Generate CSV ---
+            csv_filename = os.path.join(output_dir_path, f'speed_data_{timestamp_str}.csv')
+            with open(csv_filename, 'w', newline='') as f:
+                writer = csv.writer(f)
+                # Data Header
+                writer.writerow(['Session ID', 'Timestamp', 'Point Number', 'Relative Time (s)', 'Speed (km/h)'])
+                # Data Rows
+                for i, (t, s) in enumerate(zip(relative_times, net_speeds)):
+                    writer.writerow([session_id, timestamp_str, i+1, f"{t:.2f}", f"{s:.1f}"])
+                # Summary Section
+                writer.writerow([]) # Empty row separator
+                writer.writerow(['Statistic', 'Value'])
+                writer.writerow(['Total Points', len(net_speeds)])
+                writer.writerow(['Average Speed (km/h)', f"{avg_speed:.1f}"])
+                writer.writerow(['Maximum Speed (km/h)', f"{max_speed:.1f}"])
+                writer.writerow(['Minimum Speed (km/h)', f"{min_speed:.1f}"])
+            print(f"[FileWriter] CSV saved to {csv_filename}")
+
+            print(f"[FileWriter] Output files for session {session_id} saved successfully to {output_dir_path}")
+
+        except Exception as e:
+            print(f"[FileWriter] Error generating output files for session {session_id}: {e}")
+            import traceback
+            traceback.print_exc()
+
+
+    def _draw_visualizations(self, display_frame, frame_data_obj: FrameData, waiting_for_frame=False):
+        """Draws tracking information onto the display frame. Handles waiting state."""
+        # If waiting, use the last known good frame, otherwise use the current one
+        vis_frame = display_frame if not waiting_for_frame else self.last_frame_display
+        if vis_frame is None: # Handle case where no frame has been received yet
+             vis_frame = np.zeros((self.frame_height, self.frame_width, 3), dtype=np.uint8)
+             cv2.putText(vis_frame, "Initializing...", self.waiting_text_org, self.waiting_text_font,
+                         self.waiting_text_scale, self.waiting_text_color, self.waiting_text_thickness)
+             return vis_frame # Return blank frame with initializing text
+
+        profiling_texts = [] # Collect profiling info if debug mode
+        t_draw_start = time.perf_counter()
+
+        # Apply static overlay with transparency
+        # Make a copy if we are potentially modifying the stored last_frame_display
+        if waiting_for_frame:
+            vis_frame = vis_frame.copy()
+        vis_frame = cv2.addWeighted(vis_frame, 1.0, self.static_overlay, 0.4, 0)
+
+        # If waiting, display waiting message and return
+        if waiting_for_frame:
+            cv2.putText(vis_frame, "Waiting for camera frame...", self.waiting_text_org, self.waiting_text_font,
+                        self.waiting_text_scale, self.waiting_text_color, self.waiting_text_thickness)
+            return vis_frame
+
+        # --- If not waiting, draw normal visualizations ---
         is_full_draw = frame_data_obj.frame_counter % VISUALIZATION_DRAW_INTERVAL == 0
 
-        if is_full_draw:
-            vis_frame = cv2.addWeighted(vis_frame, 1.0, self.static_overlay, 0.7, 0)
-            if frame_data_obj.trajectory_points_global and len(frame_data_obj.trajectory_points_global) >= 2:
-                pts = np.array(frame_data_obj.trajectory_points_global, dtype=np.int32).reshape((-1, 1, 2))
-                cv2.polylines(vis_frame, [pts], isClosed=False, color=TRAJECTORY_COLOR_BGR, thickness=2)
+        # Draw Trajectory (Full Draw)
+        if is_full_draw and frame_data_obj.trajectory_points_global and len(frame_data_obj.trajectory_points_global) >= 2:
+            t_traj_start = time.perf_counter()
+            pts = np.array(frame_data_obj.trajectory_points_global, dtype=np.int32).reshape((-1, 1, 2))
+            cv2.polylines(vis_frame, [pts], isClosed=False, color=TRAJECTORY_COLOR_BGR, thickness=2)
+            if self.debug_mode: profiling_texts.append(f"TrajDraw:{(time.perf_counter() - t_traj_start)*1000:.1f}ms")
 
-        # 如果處於調試模式並每30幀顯示一次透視網格
-        if self.debug_mode and frame_data_obj.frame_counter % DRAW_GRID_INTERVAL == 0:
-            vis_frame = self.perspective_corrector.visualize_grid(vis_frame, grid_step_cm=20)
-            cv2.putText(vis_frame, "Grid: 20cm x 20cm", (10, 310), 
-                       cv2.FONT_HERSHEY_SIMPLEX, 0.6, GRID_COLOR_BGR, 1)
-
-        if frame_data_obj.ball_position_in_roi and frame_data_obj.roi_sub_frame is not None:
+        # Draw Ball Detection (Always if detected)
+        if frame_data_obj.ball_position_in_roi:
+            t_ball_draw_start = time.perf_counter()
             cx_roi, cy_roi = frame_data_obj.ball_position_in_roi
-            cv2.circle(frame_data_obj.roi_sub_frame, (cx_roi, cy_roi), 5, BALL_COLOR_BGR, -1)
-            if frame_data_obj.ball_contour_in_roi is not None:
-                cv2.drawContours(frame_data_obj.roi_sub_frame, [frame_data_obj.ball_contour_in_roi], 0, CONTOUR_COLOR_BGR, 2)
-            
             cx_global = cx_roi + self.roi_start_x
             cy_global = cy_roi + self.roi_top_y
             cv2.circle(vis_frame, (cx_global, cy_global), 8, BALL_COLOR_BGR, -1)
+            if is_full_draw and frame_data_obj.ball_contour_in_roi is not None:
+                 offset_contour = frame_data_obj.ball_contour_in_roi + np.array([self.roi_start_x, self.roi_top_y])
+                 cv2.drawContours(vis_frame, [offset_contour], 0, CONTOUR_COLOR_BGR, 1)
+            if self.debug_mode: profiling_texts.append(f"BallDraw:{(time.perf_counter() - t_ball_draw_start)*1000:.1f}ms")
 
-        cv2.putText(vis_frame, f"Speed: {frame_data_obj.current_ball_speed_kmh:.1f} km/h", (10, 30), cv2.FONT_HERSHEY_SIMPLEX, FONT_SCALE_VIS, SPEED_TEXT_COLOR_BGR, FONT_THICKNESS_VIS)
-        cv2.putText(vis_frame, f"FPS: {frame_data_obj.display_fps:.1f}", (10, 70), cv2.FONT_HERSHEY_SIMPLEX, FONT_SCALE_VIS, FPS_TEXT_COLOR_BGR, FONT_THICKNESS_VIS)
-        
+        # Draw Text Overlays (Always)
+        t_text_start = time.perf_counter()
+        y_pos = 30
+        y_step = 35
+        cv2.putText(vis_frame, f"Speed: {frame_data_obj.current_ball_speed_kmh:.1f} km/h", (10, y_pos), cv2.FONT_HERSHEY_SIMPLEX, FONT_SCALE_VIS, SPEED_TEXT_COLOR_BGR, FONT_THICKNESS_VIS)
+        y_pos += y_step
+        cv2.putText(vis_frame, f"FPS: {frame_data_obj.display_fps:.1f}", (10, y_pos), cv2.FONT_HERSHEY_SIMPLEX, FONT_SCALE_VIS, FPS_TEXT_COLOR_BGR, FONT_THICKNESS_VIS)
+        y_pos += y_step
         count_status_text = "ON" if frame_data_obj.is_counting_active else "OFF"
         count_color = (0, 255, 0) if frame_data_obj.is_counting_active else (0, 0, 255)
-        cv2.putText(vis_frame, f"Counting: {count_status_text}", (10, 110), cv2.FONT_HERSHEY_SIMPLEX, FONT_SCALE_VIS, count_color, FONT_THICKNESS_VIS)
-        
+        cv2.putText(vis_frame, f"Counting: {count_status_text} (Sess:{self.count_session_id})", (10, y_pos), cv2.FONT_HERSHEY_SIMPLEX, FONT_SCALE_VIS, count_color, FONT_THICKNESS_VIS)
+        y_pos += y_step
+        cv2.putText(vis_frame, f"Recorded: {len(frame_data_obj.collected_net_speeds)}/{self.max_net_speeds_to_collect}", (10, y_pos), cv2.FONT_HERSHEY_SIMPLEX, FONT_SCALE_VIS, NET_SPEED_TEXT_COLOR_BGR, FONT_THICKNESS_VIS)
+        y_pos += y_step
         if frame_data_obj.last_recorded_net_speed_kmh > 0:
-            cv2.putText(vis_frame, f"Last Net: {frame_data_obj.last_recorded_net_speed_kmh:.1f} km/h", (10, 150), cv2.FONT_HERSHEY_SIMPLEX, FONT_SCALE_VIS, NET_SPEED_TEXT_COLOR_BGR, FONT_THICKNESS_VIS)
-        
-        cv2.putText(vis_frame, f"Recorded: {len(frame_data_obj.collected_net_speeds)}/{self.max_net_speeds_to_collect}", (10, 190), cv2.FONT_HERSHEY_SIMPLEX, FONT_SCALE_VIS, NET_SPEED_TEXT_COLOR_BGR, FONT_THICKNESS_VIS)
-        
+            cv2.putText(vis_frame, f"Last Net: {frame_data_obj.last_recorded_net_speed_kmh:.1f} km/h", (10, y_pos), cv2.FONT_HERSHEY_SIMPLEX, FONT_SCALE_VIS, NET_SPEED_TEXT_COLOR_BGR, FONT_THICKNESS_VIS)
+            y_pos += y_step
         if frame_data_obj.collected_relative_times:
-            cv2.putText(vis_frame, f"Last Time: {frame_data_obj.collected_relative_times[-1]:.2f}s", (10, 230), cv2.FONT_HERSHEY_SIMPLEX, FONT_SCALE_VIS, NET_SPEED_TEXT_COLOR_BGR, FONT_THICKNESS_VIS)
+            cv2.putText(vis_frame, f"Last Time: {frame_data_obj.collected_relative_times[-1]:.2f}s", (10, y_pos), cv2.FONT_HERSHEY_SIMPLEX, FONT_SCALE_VIS, NET_SPEED_TEXT_COLOR_BGR, FONT_THICKNESS_VIS)
+            y_pos += y_step
+        cv2.putText(vis_frame, self.instruction_text, (10, self.frame_height - 20), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 1)
 
-        # 顯示深度校正狀態
-        corr_status = "ON" if DEPTH_CORRECTION_ENABLE else "OFF"
-        corr_color = (0, 255, 0) if DEPTH_CORRECTION_ENABLE else (0, 0, 255)
-        cv2.putText(vis_frame, f"Depth Corr: {corr_status} (x{self.depth_correction_factor:.1f})", (10, 270), 
-                   cv2.FONT_HERSHEY_SIMPLEX, 0.6, corr_color, 1)
+        # Debug Info Text
+        if self.debug_mode:
+            debug_info = f"Traj:{len(self.trajectory)} EvtBuf:{len(self.event_buffer_center_cross)}"
+            if frame_data_obj.debug_display_text:
+                 debug_info += " " + frame_data_obj.debug_display_text
+            cv2.putText(vis_frame, debug_info, (10, y_pos), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (200, 200, 0), 1)
+            y_pos += y_step
+            profiling_summary = frame_data_obj.profiling_info
+            profiling_texts.append(f"TextDraw:{(time.perf_counter() - t_text_start)*1000:.1f}ms")
+            total_draw_time = time.perf_counter() - t_draw_start
+            profiling_texts.append(f"TotDraw: {total_draw_time*1000:.1f}ms")
+            profiling_summary += " | " + " ".join(profiling_texts)
+            cv2.putText(vis_frame, profiling_summary, (10, self.frame_height - 40), cv2.FONT_HERSHEY_SIMPLEX, 0.4, (0, 230, 230), 1)
 
-        cv2.putText(vis_frame, self.instruction_text, (10, self.frame_height - 20), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 1)
-
-        if self.debug_mode and frame_data_obj.debug_display_text:
-            cv2.putText(vis_frame, frame_data_obj.debug_display_text, (10, 350), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (200, 200, 0), 1)
-            
+        # Store the successfully drawn frame as the last good one
+        self.last_frame_display = vis_frame.copy() # Store a copy
         return vis_frame
 
+
     def _check_timeout_and_reset(self):
+        """Resets trajectory if no ball detected for timeout duration."""
+        # This timeout only affects the trajectory, not system shutdown.
         if time.monotonic() - self.last_detection_timestamp > self.detection_timeout_s:
-            self.trajectory.clear()
-            self.current_ball_speed_kmh = 0
+            if self.trajectory: # Only clear if it's not already empty
+                self.trajectory.clear()
+                self.current_ball_speed_kmh = 0 # Reset speed as well
+                self.last_ball_x_global = None # Reset last position for crossing check
+                self.last_ball_timestamp = None
+                if self.debug_mode: print("Ball detection timeout: Trajectory reset.")
+            # No need to reset crossed_center flag, it's handled by cooldown/event buffer
+
 
     def process_single_frame(self, frame):
-        global DEPTH_CORRECTION_ENABLE
-        
+        """Processes a single frame for ball detection, tracking, and speed calculation."""
+        t_start_process = time.perf_counter()
+        profiling_results = []
+
         self.frame_counter += 1
-        self._update_display_fps()
-            
-        roi_sub_frame, gray_roi_for_fmo = self._preprocess_frame(frame) 
-        
+        self._update_display_fps() # Update measured FPS
+
+        # 1. Preprocessing (ROI, Grayscale, Blur)
+        t_start_pre = time.perf_counter()
+        # roi_sub_frame is a view, gray_roi_for_fmo is new data
+        roi_sub_frame, gray_roi_for_fmo = self._preprocess_frame(frame)
+        if self.debug_mode: profiling_results.append(f"Pre:{(time.perf_counter() - t_start_pre)*1000:.1f}ms")
+
+        # 2. Fast Motion Object Detection (FMO)
+        t_start_fmo = time.perf_counter()
         motion_mask_roi = self._detect_fmo()
-        
+        if self.debug_mode: profiling_results.append(f"FMO:{(time.perf_counter() - t_start_fmo)*1000:.1f}ms")
+
+        # 3. Ball Detection and Tracking
+        t_start_detect = time.perf_counter()
         ball_pos_in_roi, ball_contour_in_roi = None, None
-        ball_area = None
+        detection_successful = False # Flag to indicate if a ball was found in this frame
         if motion_mask_roi is not None:
+            # This step updates trajectory, last_detection_timestamp,
+            # and potentially calls check_center_crossing (which updates event buffer)
             ball_pos_in_roi, ball_contour_in_roi = self._detect_ball_in_roi(motion_mask_roi)
-            ball_area = self.last_ball_area
-            self._calculate_ball_speed() 
-        
+            if ball_pos_in_roi is not None:
+                 detection_successful = True # Set flag if ball detected
+        if self.debug_mode: profiling_results.append(f"Detect:{(time.perf_counter() - t_start_detect)*1000:.1f}ms")
+
+        # 4. Speed Calculation (uses updated trajectory)
+        t_start_speed = time.perf_counter()
+        # Only calculate speed if a ball was detected/trajectory updated in this frame
+        if detection_successful:
+             self._calculate_ball_speed()
+        if self.debug_mode: profiling_results.append(f"Speed:{(time.perf_counter() - t_start_speed)*1000:.1f}ms")
+
+        # 5. Timeout Check (Reset trajectory if ball lost)
+        t_start_timeout = time.perf_counter()
+        # Pass detection result to timeout check - reset only if no ball *currently* detected
+        # Or keep original logic: reset if no ball detected for X seconds? Keep original.
         self._check_timeout_and_reset()
-        
+        if self.debug_mode: profiling_results.append(f"Timeout:{(time.perf_counter() - t_start_timeout)*1000:.1f}ms")
+
+        # 6. Process buffered crossing events (if counting)
+        t_start_events = time.perf_counter()
         if self.is_counting_active:
             self._process_crossing_events()
+        if self.debug_mode: profiling_results.append(f"Events:{(time.perf_counter() - t_start_events)*1000:.1f}ms")
 
-        # 球體大小校正信息
-        corr_text = ""
-        if self.debug_mode and DEPTH_CORRECTION_ENABLE:
-            corr_text = f"深度校正: "
-            if 'correction' in self.perspective_corrector.last_correction_info:
-                corr = self.perspective_corrector.last_correction_info['correction']
-                depth = self.perspective_corrector.last_correction_info.get('depth_factor', 0)
-                raw_dist = self.perspective_corrector.last_correction_info.get('raw_distance_cm', 0)
-                corr_dist = self.perspective_corrector.last_correction_info.get('corrected_distance_cm', 0)
-                corr_text += f"因子={corr:.2f}, 深度={depth:.2f}, 距離={raw_dist:.1f}cm→{corr_dist:.1f}cm"
-
+        # 7. Prepare FrameData for visualization
+        # Pass copies of mutable lists that might change concurrently (though less likely now)
         frame_data = FrameData(
-            frame=frame,
-            roi_sub_frame=roi_sub_frame,
+            frame=frame, # Pass the original frame (or view) for drawing
+            roi_sub_frame=roi_sub_frame, # Pass the ROI view
             ball_position_in_roi=ball_pos_in_roi,
             ball_contour_in_roi=ball_contour_in_roi,
             current_ball_speed_kmh=self.current_ball_speed_kmh,
             display_fps=self.display_fps,
             is_counting_active=self.is_counting_active,
-            collected_net_speeds=list(self.collected_net_speeds),
+            collected_net_speeds=list(self.collected_net_speeds), # Copy
             last_recorded_net_speed_kmh=self.last_recorded_net_speed_kmh,
-            collected_relative_times=list(self.collected_relative_times),
-            debug_display_text=corr_text if corr_text else 
-                              f"Traj: {len(self.trajectory)}, Events: {len(self.event_buffer_center_cross)}",
-            frame_counter=self.frame_counter
+            collected_relative_times=list(self.collected_relative_times), # Copy
+            debug_display_text=None, # Specific debug text can be added here if needed
+            frame_counter=self.frame_counter,
+            profiling_info = " ".join(profiling_results) if self.debug_mode else ""
         )
-        frame_data.ball_area = ball_area
-        
+        # Get global trajectory points for drawing
         if self.trajectory:
+            # Convert trajectory points (float) to int for drawing
             frame_data.trajectory_points_global = [(int(p[0]), int(p[1])) for p in self.trajectory]
-        
+
+        if self.debug_mode:
+            total_process_time = time.perf_counter() - t_start_process
+            frame_data.profiling_info += f" | TotProc:{total_process_time*1000:.1f}ms"
+            # Optional: Print if processing takes longer than frame interval
+            # frame_interval = 1.0 / self.display_fps if self.display_fps > 0 else 0
+            # if frame_interval > 0 and total_process_time > frame_interval:
+            #     print(f"WARNING: Frame {self.frame_counter} processing time ({total_process_time*1000:.1f}ms) > frame interval ({frame_interval*1000:.1f}ms)")
+
         return frame_data
 
-    def run(self):
-        global DEPTH_CORRECTION_ENABLE
-        global BALL_SIZE_CORRECTION_ENABLE
-        
-        print("=== 乒乓球速度追蹤器 v11.1 增強版 (進階深度校正) ===")
-        print(self.instruction_text)
-        print(f"透視校正: 近端 {self.near_side_width_cm}cm, 遠端 {self.far_side_width_cm}cm, 長度 {self.table_length_cm}cm")
-        print(f"深度校正: {'啟用' if DEPTH_CORRECTION_ENABLE else '停用'}, 係數 x{self.depth_correction_factor:.1f}, 曲線 {self.depth_correction_curve:.1f}")
-        print(f"球體大小校正: {'啟用' if BALL_SIZE_CORRECTION_ENABLE else '停用'}")
-        print(f"穿越方向: {self.net_crossing_direction}")
-        print(f"目標收集速度數: {self.max_net_speeds_to_collect}")
-        if self.debug_mode: print("調試模式已啟用 (會顯示透視網格和校正資訊).")
 
-        self.running = True
-        self.reader.start()
-        
-        window_name = 'Ping Pong Speed Tracker v11.1 Enhanced'
-        cv2.namedWindow(window_name, cv2.WINDOW_AUTOSIZE)
+    def run(self):
+        print("=== Ping Pong Speed Tracker v11.2 ===")
+        print(f"Input Source: {'Video File' if self.use_video_file else 'Webcam'}")
+        print(f"Resolution: {self.frame_width}x{self.frame_height} @ {self.actual_fps:.1f} FPS (Reported/Target)")
+        print(self.instruction_text)
+        print(f"Perspective: Near {self.near_side_width_cm}cm, Far {self.far_side_width_cm}cm")
+        print(f"Net crossing direction: {self.net_crossing_direction}")
+        print(f"Target speeds to collect: {self.max_net_speeds_to_collect}")
+        if self.debug_mode: print("Debug mode ENABLED.")
+
+        self.main_loop_running = True
+        self.reader.start() # Start the frame reading thread
+
+        window_name = 'Ping Pong Speed Tracker v11.2'
+        cv2.namedWindow(window_name, cv2.WINDOW_AUTOSIZE) # Or WINDOW_NORMAL
+
+        frame_data_obj = None # To hold the last valid processed data
+        waiting_for_frame = False # Flag to indicate if we are waiting
 
         try:
-            while self.running:
+            while self.main_loop_running:
+                t_loop_start = time.perf_counter()
+
+                # 1. Read Frame from Queue
                 ret, frame = self.reader.read()
-                if not ret or frame is None:
-                    if self.use_video_file: print("影片結束或讀取錯誤.")
-                    else: print("相機錯誤或串流結束.")
+
+                # --- Handle Read Result ---
+                if ret is True and frame is not None:
+                    # Successfully got a frame
+                    waiting_for_frame = False # No longer waiting
+                    # 2. Process Frame
+                    frame_data_obj = self.process_single_frame(frame)
+                    # 3. Draw Visualizations (Normal)
+                    display_frame = self._draw_visualizations(frame_data_obj.frame, frame_data_obj, waiting_for_frame=False)
+
+                elif ret is False:
+                    # Read failed in the reader thread (e.g., camera disconnected, end of video)
+                    print("Reader indicated read failure. Stopping main loop.")
+                    self.main_loop_running = False # Stop the main loop
+                    waiting_for_frame = False # Not waiting anymore
+                    # Generate final output if needed
                     if self.is_counting_active and self.collected_net_speeds and not self.output_generated_for_session:
-                        print("串流結束但有未處理的數據. 正在生成輸出.")
+                        print("Read failure with pending data. Generating output.")
                         self._generate_outputs_async()
                         self.output_generated_for_session = True
-                    break
-                
-                frame_data_obj = self.process_single_frame(frame)
-                
-                display_frame = self._draw_visualizations(frame_data_obj.frame, frame_data_obj)
-                
-                cv2.imshow(window_name, display_frame)
-                
-                key = cv2.waitKey(1) & 0xFF
-                if key == ord('q') or key == 27: # ESC
-                    self.running = False
+                    continue # Skip rest of the loop
+
+                elif ret is None:
+                    # Timeout happened in reader.read() - no frame arrived in time
+                    if not self.reader.is_running:
+                         # Reader is stopped, likely end of video or user quit indirectly
+                         print("Reader stopped while waiting for frame. Stopping main loop.")
+                         self.main_loop_running = False
+                         waiting_for_frame = False
+                         continue
+                    else:
+                         # Reader is still running, just haven't received a frame yet (temporary issue?)
+                         waiting_for_frame = True # Set waiting flag
+                         print("Waiting for camera frame...") # Inform user
+                         # 3. Draw Visualizations (Waiting State) - using last good frame
+                         # Pass frame_data_obj=None or similar? Draw needs last good frame.
+                         display_frame = self._draw_visualizations(None, None, waiting_for_frame=True)
+
+                else:
+                    # Should not happen, but handle unexpected case
+                    print(f"Unexpected return from reader.read(): ret={ret}. Skipping frame.")
+                    waiting_for_frame = False
+                    continue
+
+                # 4. Display Frame (either normal or waiting frame)
+                if display_frame is not None:
+                     cv2.imshow(window_name, display_frame)
+                else:
+                     # Handle case where display_frame is None (e.g., first frame init failed)
+                     # Display a black screen or placeholder
+                     placeholder = np.zeros((self.frame_height, self.frame_width, 3), dtype=np.uint8)
+                     cv2.putText(placeholder, "Error displaying frame", (50, 50), cv2.FONT_HERSHEY_SIMPLEX, 1, (255,255,255), 2)
+                     cv2.imshow(window_name, placeholder)
+
+
+                # 5. Handle User Input
+                key = cv2.waitKey(1) & 0xFF # waitKey(1) is crucial for frame display
+                if key == ord('q') or key == 27: # ESC key
+                    print("Quit key pressed.")
+                    self.main_loop_running = False # Signal loop to stop
+                    # Generate output if quitting with data
                     if self.is_counting_active and self.collected_net_speeds and not self.output_generated_for_session:
-                        print("退出程序但有未處理的數據. 正在生成輸出.")
-                        self._generate_outputs_async()
-                        self.output_generated_for_session = True
-                    break
-                elif key == ord(' '):
+                         print("Quitting with pending data. Generating output...")
+                         self._generate_outputs_async()
+                         self.output_generated_for_session = True
+                    # No need to break here, loop condition will handle it
+                elif key == ord(' '): # Space bar
                     self.toggle_counting()
-                elif key == ord('d'):
+                elif key == ord('d'): # 'd' key
                     self.debug_mode = not self.debug_mode
-                    print(f"調試模式: {'開啟' if self.debug_mode else '關閉'}")
-                # 新增: 增加/減少深度校正因子
-                elif key == ord('+') or key == ord('='):
-                    self.depth_correction_factor += 0.1
-                    self.perspective_corrector.depth_correction_factor = self.depth_correction_factor
-                    print(f"深度校正因子增加到: {self.depth_correction_factor:.1f}")
-                elif key == ord('-') or key == ord('_'):
-                    self.depth_correction_factor = max(1.0, self.depth_correction_factor - 0.1)
-                    self.perspective_corrector.depth_correction_factor = self.depth_correction_factor
-                    print(f"深度校正因子減少到: {self.depth_correction_factor:.1f}")
-                # 新增: 開關深度校正
-                elif key == ord('c'):
-                    DEPTH_CORRECTION_ENABLE = not DEPTH_CORRECTION_ENABLE
-                    self.perspective_corrector.enable_depth_correction = DEPTH_CORRECTION_ENABLE
-                    print(f"深度校正: {'啟用' if DEPTH_CORRECTION_ENABLE else '停用'}")
+                    print(f"Debug mode: {'ON' if self.debug_mode else 'OFF'}")
+
+                # Optional: Print loop time for performance diagnosis
+                if self.debug_mode and self.frame_counter % 30 == 0: # Print less often
+                    loop_time = time.perf_counter() - t_loop_start
+                    print(f"Main loop time: {loop_time*1000:.1f}ms (Waiting: {waiting_for_frame})")
+
 
         except KeyboardInterrupt:
-            print("程序被用戶中斷.")
+            print("Process interrupted by user (Ctrl+C).")
+            self.main_loop_running = False # Signal loop to stop
+            # Generate output if interrupted with data
             if self.is_counting_active and self.collected_net_speeds and not self.output_generated_for_session:
-                print("中斷程序但有未處理的數據. 正在生成輸出.")
-                self._generate_outputs_async()
-                self.output_generated_for_session = True
+                 print("Interrupted with pending data. Generating output.")
+                 self._generate_outputs_async()
+                 self.output_generated_for_session = True
         finally:
-            self.running = False
-            print("正在關閉系統...")
-            self.reader.stop()
-            print("影像讀取器已停止.")
-            self.file_writer_executor.shutdown(wait=True)
-            print("檔案寫入器已停止.")
+            print("Shutting down...")
+            # Ensure reader thread is stopped cleanly
+            if hasattr(self, 'reader'):
+                 self.reader.stop() # This now sets reader.running = False
+
+            # Shutdown the file writer executor, wait for tasks to complete
+            if hasattr(self, 'file_writer_executor'):
+                 print("Waiting for file writer tasks to complete...")
+                 # Allow slightly more time?
+                 self.file_writer_executor.shutdown(wait=True, cancel_futures=False)
+                 print("File writer stopped.")
+
             cv2.destroyAllWindows()
-            print("系統關閉完成.")
+            print("System shutdown complete.")
 
 
 def main():
-    global DEPTH_CORRECTION_ENABLE
-    global BALL_SIZE_CORRECTION_ENABLE
-    
-    parser = argparse.ArgumentParser(description='乒乓球速度追蹤器 v11.1 進階深度校正版')
-    parser.add_argument('--video', type=str, default=None, help='視頻檔路徑. 如果不指定則使用網路攝影機.')
-    parser.add_argument('--camera_idx', type=int, default=DEFAULT_CAMERA_INDEX, help='網路攝影機索引.')
-    parser.add_argument('--fps', type=int, default=DEFAULT_TARGET_FPS, help='目標幀率.')
-    parser.add_argument('--width', type=int, default=DEFAULT_FRAME_WIDTH, help='影像寬度.')
-    parser.add_argument('--height', type=int, default=DEFAULT_FRAME_HEIGHT, help='影像高度.')
-    parser.add_argument('--table_len', type=int, default=DEFAULT_TABLE_LENGTH_CM, help='桌球桌長度 (cm).')
-    parser.add_argument('--timeout', type=float, default=DEFAULT_DETECTION_TIMEOUT, help='球體偵測超時 (秒).')
-    
+    parser = argparse.ArgumentParser(description='Ping Pong Speed Tracker v11.2')
+    parser.add_argument('--video', type=str, default=None, help='Path to video file. If None, uses webcam.')
+    parser.add_argument('--camera_idx', type=int, default=DEFAULT_CAMERA_INDEX, help='Webcam index.')
+    parser.add_argument('--fps', type=int, default=DEFAULT_TARGET_FPS, help='Target FPS for webcam.')
+    parser.add_argument('--width', type=int, default=DEFAULT_FRAME_WIDTH, help='Frame width.')
+    parser.add_argument('--height', type=int, default=DEFAULT_FRAME_HEIGHT, help='Frame height.')
+    parser.add_argument('--table_len', type=float, default=DEFAULT_TABLE_LENGTH_CM, help='Table length (cm) for perspective fallback.') # Allow float
+    parser.add_argument('--timeout', type=float, default=DEFAULT_DETECTION_TIMEOUT, help='Ball detection timeout (s) for trajectory reset.') # Clarified help text
+
     parser.add_argument('--direction', type=str, default=NET_CROSSING_DIRECTION_DEFAULT,
-                        choices=['left_to_right', 'right_to_left', 'both'], help='網中心穿越方向.')
-    parser.add_argument('--count', type=int, default=MAX_NET_SPEEDS_TO_COLLECT, help='每個會話收集的速度數.')
-    
-    parser.add_argument('--near_width', type=int, default=NEAR_SIDE_WIDTH_CM_DEFAULT, help='ROI近端實際寬度 (cm).')
-    parser.add_argument('--far_width', type=int, default=FAR_SIDE_WIDTH_CM_DEFAULT, help='ROI遠端實際寬度 (cm).')
-    
-    parser.add_argument('--depth_corr', type=float, default=DEPTH_CORRECTION_FACTOR, help='深度校正係數 (預設1.6).')
-    parser.add_argument('--depth_curve', type=float, default=DEPTH_CORRECTION_CURVE, help='深度校正曲線 (預設2.0).')
-    parser.add_argument('--disable_depth_corr', action='store_true', help='停用深度校正.')
-    parser.add_argument('--disable_size_corr', action='store_true', help='停用球體大小校正.')
-    
-    parser.add_argument('--debug', action='store_true', default=DEBUG_MODE_DEFAULT, help='啟用調試輸出.')
+                        choices=['left_to_right', 'right_to_left', 'both'], help='Net crossing direction to record.')
+    parser.add_argument('--count', type=int, default=MAX_NET_SPEEDS_TO_COLLECT, help='Number of net speeds to collect per session.')
+
+    parser.add_argument('--near_width', type=float, default=NEAR_SIDE_WIDTH_CM_DEFAULT, help='Real width (cm) of ROI at near side.') # Allow float
+    parser.add_argument('--far_width', type=float, default=FAR_SIDE_WIDTH_CM_DEFAULT, help='Real width (cm) of ROI at far side.') # Allow float
+
+    parser.add_argument('--debug', action='store_true', default=DEBUG_MODE_DEFAULT, help='Enable debug printouts and profiling.')
+
+    # Example of how to make other parameters configurable if needed:
+    # parser.add_argument('--vis_interval', type=int, default=VISUALIZATION_DRAW_INTERVAL, help='Full visualization draw interval (frames).')
+    # parser.add_argument('--cooldown', type=float, default=CENTER_DETECTION_COOLDOWN_S, help='Net detection cooldown (s).')
+
 
     args = parser.parse_args()
-    
-    # 根據命令列參數設置全局變數
-    if args.disable_depth_corr:
-        DEPTH_CORRECTION_ENABLE = False
-    
-    if args.disable_size_corr:
-        BALL_SIZE_CORRECTION_ENABLE = False
+
+    # Update globals if configured via args (Example)
+    # VISUALIZATION_DRAW_INTERVAL = args.vis_interval
+    # CENTER_DETECTION_COOLDOWN_S = args.cooldown
 
     video_source_arg = args.video if args.video else args.camera_idx
     use_video_file_arg = True if args.video else False
 
-    tracker = PingPongSpeedTracker(
-        video_source=video_source_arg,
-        table_length_cm=args.table_len,
-        detection_timeout_s=args.timeout,
-        use_video_file=use_video_file_arg,
-        target_fps=args.fps,
-        frame_width=args.width,
-        frame_height=args.height,
-        debug_mode=args.debug,
-        net_crossing_direction=args.direction,
-        max_net_speeds=args.count,
-        near_width_cm=args.near_width,
-        far_width_cm=args.far_width,
-        depth_correction_factor=args.depth_corr,
-        depth_correction_curve=args.depth_curve
-    )
-    tracker.run()
+    try:
+        tracker = PingPongSpeedTracker(
+            video_source=video_source_arg,
+            table_length_cm=args.table_len,
+            detection_timeout_s=args.timeout,
+            use_video_file=use_video_file_arg,
+            target_fps=args.fps,
+            frame_width=args.width,
+            frame_height=args.height,
+            debug_mode=args.debug,
+            net_crossing_direction=args.direction,
+            max_net_speeds=args.count,
+            near_width_cm=args.near_width,
+            far_width_cm=args.far_width
+            # Pass other args if configured:
+            # cooldown_s=args.cooldown,
+            # vis_interval=args.vis_interval,
+        )
+        tracker.run()
+    except IOError as e:
+        print(f"ERROR initializing tracker: {e}")
+        print("Please check camera index/video path and permissions.")
+    except Exception as e:
+        print(f"An unexpected error occurred: {e}")
+        import traceback
+        traceback.print_exc()
+
 
 if __name__ == '__main__':
     main()

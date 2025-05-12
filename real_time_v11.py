@@ -77,7 +77,7 @@ FONT_THICKNESS_VIS = 2
 VISUALIZATION_DRAW_INTERVAL = 2 # Draw full visuals every N frames
 
 # Threading & Queue Parameters
-FRAME_QUEUE_SIZE = 5 # For FrameReader
+FRAME_QUEUE_SIZE = 10 # For FrameReader
 EVENT_BUFFER_SIZE_CENTER_CROSS = 70
 PREDICTION_LOOKAHEAD_FRAMES = 15
 
@@ -90,9 +90,9 @@ cv2.setUseOptimized(True)
 # For "use all performance", os.cpu_count() can be a good choice.
 # 0 means OpenCV will try to optimize automatically.
 try:
-    cv2.setNumThreads(os.cpu_count() or 4) # Fallback if os.cpu_count() is None/0
+    cv2.setNumThreads(os.cpu_count() or 10) # Fallback if os.cpu_count() is None/0
 except AttributeError: # os.cpu_count() might not be available on all os modules
-    cv2.setNumThreads(4) # Default to 4 threads if os.cpu_count() fails
+    cv2.setNumThreads(10) # Default to 4 threads if os.cpu_count() fails
 
 class FrameData:
     """Data structure for passing frame-related information."""
