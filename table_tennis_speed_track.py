@@ -931,6 +931,12 @@ def record_video(name, device_index=DEFAULT_CAMERA_INDEX,
             fps_count = 0
             fps_start = time.time()
         
+        # 如果正在錄製，寫入視頻
+        if recording:
+            out.write(frame)
+            frame_times.append(time.time())
+            frames_recorded += 1
+        
         # 在畫面上顯示資訊
         status_text = "RECORDING..." if recording else "READY (Press SPACE to start)"
         cv2.putText(frame, status_text, (20, 40), cv2.FONT_HERSHEY_SIMPLEX, 
@@ -965,11 +971,11 @@ def record_video(name, device_index=DEFAULT_CAMERA_INDEX,
         # 顯示預覽
         cv2.imshow('High FPS Camera', frame)
         
-        # 如果正在錄製，寫入視頻
-        if recording:
-            out.write(frame)
-            frame_times.append(time.time())
-            frames_recorded += 1
+        # # 如果正在錄製，寫入視頻
+        # if recording:
+        #     out.write(frame)
+        #     frame_times.append(time.time())
+        #     frames_recorded += 1
         
         # 處理按鍵
         key = cv2.waitKey(1) & 0xFF
@@ -1078,8 +1084,8 @@ def main():
     print("您也可以隨時按 ESC 或 Q 鍵手動結束分析並生成報告。")
     
     tracker = PingPongSpeedTracker(
-        video_source='/Users/leeyuchen/Movies/桌球data/自錄影片/球隊/1/C0068.MP4',
-        # video_source=video_path,
+        # video_source='/Users/leeyuchen/Movies/桌球data/自錄影片/球隊/1/C0068.MP4',
+        video_source=video_path,
         table_length_cm=DEFAULT_TABLE_LENGTH_CM,
         use_video_file=True,
         target_fps=DEFAULT_TARGET_FPS,
