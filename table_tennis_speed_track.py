@@ -1078,8 +1078,8 @@ def main():
     print("您也可以隨時按 ESC 或 Q 鍵手動結束分析並生成報告。")
     
     tracker = PingPongSpeedTracker(
-        # video_source='/Users/leeyuchen/Movies/桌球data/自錄影片/球隊/1/C0068.MP4',
-        video_source=video_path,
+        video_source='/Users/leeyuchen/Movies/桌球data/自錄影片/球隊/1/C0068.MP4',
+        # video_source=video_path,
         table_length_cm=DEFAULT_TABLE_LENGTH_CM,
         use_video_file=True,
         target_fps=DEFAULT_TARGET_FPS,
