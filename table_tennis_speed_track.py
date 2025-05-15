@@ -20,12 +20,12 @@ import concurrent.futures
 DEFAULT_CAMERA_INDEX = 0
 DEFAULT_FRAME_WIDTH = 1920
 DEFAULT_FRAME_HEIGHT = 1080
-DEFAULT_TARGET_FPS = 120
+DEFAULT_TARGET_FPS = 60
 DEFAULT_VIDEO_CODEC = 'mp4v'
 DEFAULT_TABLE_LENGTH_CM = 142
 
 # —— 偵測參數 ——
-DEFAULT_DETECTION_TIMEOUT = 0.2
+DEFAULT_DETECTION_TIMEOUT = 0.1
 DEFAULT_ROI_START_RATIO = 0.4
 DEFAULT_ROI_END_RATIO = 0.6
 DEFAULT_ROI_BOTTOM_RATIO = 0.8
@@ -40,15 +40,15 @@ NET_CROSSING_DIRECTION_DEFAULT = 'left_to_right'  # 'left_to_right', 'right_to_l
 NEAR_SIDE_WIDTH_CM_DEFAULT = 29
 FAR_SIDE_WIDTH_CM_DEFAULT = 72
 
-# —— 快速移動物體 (FMO) 參數 ——
+# FMO (Fast Moving Object) Parameters
 MAX_PREV_FRAMES_FMO = 10
-OPENING_KERNEL_SIZE_FMO = (10, 10)
+OPENING_KERNEL_SIZE_FMO = (20, 20)
 CLOSING_KERNEL_SIZE_FMO = (25, 25)
-THRESHOLD_VALUE_FMO = 8
+THRESHOLD_VALUE_FMO = 20
 
-# —— 球體偵測參數 ——
-MIN_BALL_AREA_PX = 5
-MAX_BALL_AREA_PX = 10000
+# Ball Detection Parameters
+MIN_BALL_AREA_PX = 40
+MAX_BALL_AREA_PX = 6000
 MIN_BALL_CIRCULARITY = 0.4
 
 # —— 速度計算 ——
@@ -978,7 +978,7 @@ def record_video(name, device_index=DEFAULT_CAMERA_INDEX,
         #     frames_recorded += 1
         
         # 處理按鍵
-        key = cv2.waitKey(1) & 0xFF
+        key = cv2.waitKey(3) & 0xFF
         
         # 按q鍵退出
         if key == ord('q'):
@@ -1084,8 +1084,8 @@ def main():
     print("您也可以隨時按 ESC 或 Q 鍵手動結束分析並生成報告。")
     
     tracker = PingPongSpeedTracker(
-        # video_source='/Users/leeyuchen/Movies/桌球data/自錄影片/球隊/1/C0068.MP4',
-        video_source=video_path,
+        video_source='./0515_20250515_165421/0515_20250515_165443.mp4',
+        # video_source=video_path,
         table_length_cm=DEFAULT_TABLE_LENGTH_CM,
         use_video_file=True,
         target_fps=DEFAULT_TARGET_FPS,

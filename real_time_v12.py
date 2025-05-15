@@ -36,15 +36,15 @@ MAX_TRAJECTORY_POINTS = 120
 # Center Line Detection
 CENTER_LINE_WIDTH_PIXELS = 55
 CENTER_DETECTION_COOLDOWN_S = 0.01          # 原始冷卻時間
-WEBCAM_CENTER_DETECTION_COOLDOWN_S = 0.005  # Webcam 模式下更短的冷卻時間
+WEBCAM_CENTER_DETECTION_COOLDOWN_S = 0.003  # Webcam 模式下更短的冷卻時間
 MAX_NET_SPEEDS_TO_COLLECT = 27
 NET_CROSSING_DIRECTION_DEFAULT = 'left_to_right' # 'left_to_right', 'right_to_left', 'both'
 AUTO_STOP_AFTER_COLLECTION = False
 OUTPUT_DATA_FOLDER = 'real_time_output'
 
 # 增加 Webcam 專用參數
-WEBCAM_PREDICTION_LEVELS = 6                # Webcam 模式下的預測級別 (原來只有1個)
-WEBCAM_CENTER_TOLERANCE_PX = 12             # Webcam 模式下中心線檢測的容差像素
+WEBCAM_PREDICTION_LEVELS = 10                # Webcam 模式下的預測級別 (原來只有1個)
+WEBCAM_CENTER_TOLERANCE_PX = 20             # Webcam 模式下中心線檢測的容差像素
 WEBCAM_BACKUP_DETECTION_ENABLED = True      # 是否啟用備用檢測機制
 WEBCAM_CROSS_CONFIDENCE_THRESHOLD = 0.65    # 交叉檢測的信心閾值
 
@@ -59,8 +59,8 @@ CLOSING_KERNEL_SIZE_FMO = (25, 25)
 THRESHOLD_VALUE_FMO = 8
 
 # Ball Detection Parameters
-MIN_BALL_AREA_PX = 5
-MAX_BALL_AREA_PX = 10000
+MIN_BALL_AREA_PX = 10
+MAX_BALL_AREA_PX = 8000
 MIN_BALL_CIRCULARITY = 0.4
 # Speed Calculation
 SPEED_SMOOTHING_FACTOR = 0.3
@@ -300,7 +300,7 @@ class PingPongSpeedTracker:
         cv2.line(self.static_overlay, (self.roi_end_x, self.roi_top_y), (self.roi_end_x, self.roi_bottom_y), ROI_COLOR_BGR, 2)
         cv2.line(self.static_overlay, (self.roi_start_x, self.roi_bottom_y), (self.roi_end_x, self.roi_bottom_y), ROI_COLOR_BGR, 2)
         cv2.line(self.static_overlay, (self.center_x_global, 0), (self.center_x_global, self.frame_height), CENTER_LINE_COLOR_BGR, 2)
-        self.instruction_text = "SPACE: 切換計數 | D: 除錯模式 | Q/ESC: 退出"
+        self.instruction_text = "SPACE: Switch | D: Debug | Q/ESC: Exit"
 
     def _create_perspective_lookup_table(self):
         self.perspective_lookup_px_to_cm = {}

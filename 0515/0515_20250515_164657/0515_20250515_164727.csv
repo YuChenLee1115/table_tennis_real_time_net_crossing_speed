@@ -1,0 +1,10 @@
+Timestamp,Point Number,Relative Time (s),Speed (km/h)
+20250515_164727,1,0.00,15.0
+20250515_164727,2,0.17,70.7
+20250515_164727,3,1.71,63.2
+
+Statistic,Value
+Total Points,3
+Average Speed (km/h),49.6
+Maximum Speed (km/h),70.7
+Minimum Speed (km/h),15.0
