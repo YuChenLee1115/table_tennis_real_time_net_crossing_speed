@@ -11,16 +11,25 @@ from PyQt5.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout, QH
                              QLabel, QPushButton, QTabWidget, QGroupBox, QFormLayout, 
                              QSpinBox, QDoubleSpinBox, QComboBox, QFileDialog, QMessageBox,
                              QLineEdit, QCheckBox, QSplitter, QSizePolicy, QFrame,
-                             QTextEdit, QProgressBar)
+                             QTextEdit, QProgressBar, QColorDialog, QScrollArea,
+                             QSlider, QToolButton, QStackedWidget, QGridLayout)
 from PyQt5.QtCore import Qt, QTimer, pyqtSignal, QThread, QSize
-from PyQt5.QtGui import QImage, QPixmap, QFont, QIcon
+from PyQt5.QtGui import QImage, QPixmap, QFont, QIcon, QColor
 
 # 導入您的主要乒乓球速度追蹤模組
 from table_tennis_speed_track import (PingPongSpeedTracker, DEFAULT_CAMERA_INDEX, 
                                       DEFAULT_TABLE_LENGTH_CM, DEFAULT_DETECTION_TIMEOUT,
                                       DEFAULT_TARGET_FPS, DEFAULT_FRAME_WIDTH, DEFAULT_FRAME_HEIGHT,
                                       NET_CROSSING_DIRECTION_DEFAULT, NEAR_SIDE_WIDTH_CM_DEFAULT,
-                                      FAR_SIDE_WIDTH_CM_DEFAULT)
+                                      FAR_SIDE_WIDTH_CM_DEFAULT, SPEED_SMOOTHING_FACTOR,
+                                      KMH_CONVERSION_FACTOR, DEFAULT_ROI_START_RATIO, 
+                                      DEFAULT_ROI_END_RATIO, DEFAULT_ROI_BOTTOM_RATIO,
+                                      MAX_TRAJECTORY_POINTS, MIN_BALL_AREA_PX, MAX_BALL_AREA_PX,
+                                      MIN_BALL_CIRCULARITY, CENTER_LINE_WIDTH_PIXELS,
+                                      CENTER_DETECTION_COOLDOWN_S, TRAJECTORY_COLOR_BGR,
+                                      BALL_COLOR_BGR, ROI_COLOR_BGR, SPEED_TEXT_COLOR_BGR,
+                                      FPS_TEXT_COLOR_BGR, CENTER_LINE_COLOR_BGR,
+                                      NET_SPEED_TEXT_COLOR_BGR, VISUALIZATION_DRAW_INTERVAL)
 
 class VideoThread(QThread):
     """處理影片串流的執行緒"""
@@ -85,8 +94,8 @@ class VideoThread(QThread):
             if self.recording and self.output_video is not None:
                 self.output_video.write(frame)
                 
-            # 在幀上添加 FPS 和狀態信息
-            status_text = "錄製中..." if self.recording else "即時畫面"
+            # 在幀上添加 FPS 和狀態信息 (使用英文)
+            status_text = "RECORDING..." if self.recording else "LIVE VIEW"
             status_color = (0, 0, 255) if self.recording else (0, 255, 0)
             
             cv2.putText(frame, f"FPS: {self.display_fps:.1f}", (10, 30), 
@@ -179,6 +188,29 @@ class AnalysisThread(QThread):
         self.running = False
         self.start_analysis = False
         
+        # 額外參數
+        self.detection_timeout = DEFAULT_DETECTION_TIMEOUT
+        self.roi_start_ratio = DEFAULT_ROI_START_RATIO
+        self.roi_end_ratio = DEFAULT_ROI_END_RATIO
+        self.roi_bottom_ratio = DEFAULT_ROI_BOTTOM_RATIO
+        self.max_trajectory_points = MAX_TRAJECTORY_POINTS
+        self.speed_smoothing_factor = SPEED_SMOOTHING_FACTOR
+        self.min_ball_area = MIN_BALL_AREA_PX
+        self.max_ball_area = MAX_BALL_AREA_PX
+        self.min_ball_circularity = MIN_BALL_CIRCULARITY
+        self.center_line_width = CENTER_LINE_WIDTH_PIXELS
+        self.center_detection_cooldown = CENTER_DETECTION_COOLDOWN_S
+        self.visualization_draw_interval = VISUALIZATION_DRAW_INTERVAL
+        
+        # 顏色設定
+        self.trajectory_color = TRAJECTORY_COLOR_BGR
+        self.ball_color = BALL_COLOR_BGR
+        self.roi_color = ROI_COLOR_BGR
+        self.speed_text_color = SPEED_TEXT_COLOR_BGR
+        self.fps_text_color = FPS_TEXT_COLOR_BGR
+        self.center_line_color = CENTER_LINE_COLOR_BGR
+        self.net_speed_text_color = NET_SPEED_TEXT_COLOR_BGR
+        
         # 用於控制播放速度
         self.playback_speed = 1.0
         
@@ -194,6 +226,13 @@ class AnalysisThread(QThread):
         self.far_width_cm = far_width_cm
         self.debug_mode = debug_mode
     
+    def set_advanced_parameters(self, params_dict):
+        """設定進階參數"""
+        # 使用 params_dict 中的值更新成員變數，如果存在的話
+        for key, value in params_dict.items():
+            if hasattr(self, key):
+                setattr(self, key, value)
+    
     def set_playback_speed(self, speed):
         self.playback_speed = speed
     
@@ -206,10 +245,11 @@ class AnalysisThread(QThread):
             self.running = True
             self.update_status.emit("初始化分析...")
             
-            # 創建追蹤器實例
+            # 創建追蹤器實例，注入所有參數
             self.tracker = PingPongSpeedTracker(
                 video_source=self.video_path,
                 table_length_cm=self.table_length_cm,
+                detection_timeout_s=self.detection_timeout,
                 use_video_file=True,
                 target_fps=DEFAULT_TARGET_FPS,
                 debug_mode=self.debug_mode,
@@ -219,6 +259,16 @@ class AnalysisThread(QThread):
                 output_folder=self.output_folder,
                 output_basename=self.output_basename
             )
+            
+            # 修改追蹤器的其他進階參數
+            self.tracker.roi_start_x = int(self.tracker.frame_width * self.roi_start_ratio)
+            self.tracker.roi_end_x = int(self.tracker.frame_width * self.roi_end_ratio)
+            self.tracker.roi_bottom_y = int(self.tracker.frame_height * self.roi_bottom_ratio)
+            self.tracker.roi_height_px = self.tracker.roi_bottom_y - self.tracker.roi_top_y
+            
+            # 更新參數
+            self.tracker.trajectory = queue.deque(maxlen=self.max_trajectory_points)
+            self.tracker._precalculate_overlay()  # 重新計算疊加層
             
             # 開始讀取影片而非直接運行追蹤器
             self.tracker.reader.start()
@@ -250,8 +300,8 @@ class AnalysisThread(QThread):
                     self.update_status.emit(f"正在分析 - 當前速度: {frame_data_obj.current_ball_speed_kmh:.1f} km/h")
                 else:
                     # 只顯示原始幀，不分析
-                    # 在幀上添加說明
-                    cv2.putText(frame, "按下開始分析按鈕開始處理", (50, 50), 
+                    # 在幀上添加說明 (使用英文)
+                    cv2.putText(frame, "Press START ANALYSIS button to begin processing", (50, 50), 
                               cv2.FONT_HERSHEY_SIMPLEX, 1.0, (0, 0, 255), 2)
                     self.update_frame.emit(frame)
                     self.update_status.emit("準備分析 - 按下開始分析按鈕")
@@ -292,6 +342,282 @@ class AnalysisThread(QThread):
     def stop(self):
         self.running = False
         self.wait()
+
+
+class ColorButton(QPushButton):
+    """可選擇顏色的按鈕"""
+    def __init__(self, color=(0, 0, 255), parent=None):
+        super().__init__(parent)
+        self.color_bgr = color
+        self.setMinimumWidth(80)
+        self.updateColor()
+        self.clicked.connect(self.showColorDialog)
+        
+    def updateColor(self):
+        r, g, b = self.color_bgr[2], self.color_bgr[1], self.color_bgr[0]  # BGR to RGB
+        self.setStyleSheet(f"background-color: rgb({r}, {g}, {b}); color: {'black' if (r+g+b)/3 > 128 else 'white'};")
+        self.setText(f"({r},{g},{b})")
+        
+    def showColorDialog(self):
+        r, g, b = self.color_bgr[2], self.color_bgr[1], self.color_bgr[0]  # BGR to RGB
+        color = QColorDialog.getColor(QColor(r, g, b), self, "選擇顏色")
+        if color.isValid():
+            self.color_bgr = (color.blue(), color.green(), color.red())  # RGB to BGR
+            self.updateColor()
+            
+    def getColorBGR(self):
+        return self.color_bgr
+
+
+class AdvancedSettingsWidget(QWidget):
+    """進階設定面板"""
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.initUI()
+        
+    def initUI(self):
+        # 使用滾動區域來包含所有設定
+        scroll_area = QScrollArea()
+        scroll_area.setWidgetResizable(True)
+        
+        settings_widget = QWidget()
+        main_layout = QVBoxLayout(settings_widget)
+        
+        # 使用分頁控制進階設定分類
+        tab_widget = QTabWidget()
+        
+        # === 1. 偵測參數 ===
+        detection_tab = QWidget()
+        detection_layout = QFormLayout(detection_tab)
+        
+        self.detection_timeout = QDoubleSpinBox()
+        self.detection_timeout.setRange(0.01, 1.0)
+        self.detection_timeout.setValue(DEFAULT_DETECTION_TIMEOUT)
+        self.detection_timeout.setSingleStep(0.05)
+        self.detection_timeout.setDecimals(2)
+        self.detection_timeout.setSuffix(" 秒")
+        detection_layout.addRow("偵測逾時:", self.detection_timeout)
+        
+        # ROI 參數
+        roi_group = QGroupBox("感興趣區域 (ROI)")
+        roi_layout = QFormLayout()
+        
+        self.roi_start_ratio = QDoubleSpinBox()
+        self.roi_start_ratio.setRange(0.0, 0.8)
+        self.roi_start_ratio.setValue(DEFAULT_ROI_START_RATIO)
+        self.roi_start_ratio.setSingleStep(0.05)
+        self.roi_start_ratio.setDecimals(2)
+        roi_layout.addRow("ROI 起始比例:", self.roi_start_ratio)
+        
+        self.roi_end_ratio = QDoubleSpinBox()
+        self.roi_end_ratio.setRange(0.2, 1.0)
+        self.roi_end_ratio.setValue(DEFAULT_ROI_END_RATIO)
+        self.roi_end_ratio.setSingleStep(0.05)
+        self.roi_end_ratio.setDecimals(2)
+        roi_layout.addRow("ROI 結束比例:", self.roi_end_ratio)
+        
+        self.roi_bottom_ratio = QDoubleSpinBox()
+        self.roi_bottom_ratio.setRange(0.1, 1.0)
+        self.roi_bottom_ratio.setValue(DEFAULT_ROI_BOTTOM_RATIO)
+        self.roi_bottom_ratio.setSingleStep(0.05)
+        self.roi_bottom_ratio.setDecimals(2)
+        roi_layout.addRow("ROI 底部比例:", self.roi_bottom_ratio)
+        
+        roi_group.setLayout(roi_layout)
+        detection_layout.addRow(roi_group)
+        
+        # 球體偵測參數
+        ball_group = QGroupBox("球體偵測參數")
+        ball_layout = QFormLayout()
+        
+        self.min_ball_area = QSpinBox()
+        self.min_ball_area.setRange(10, 1000)
+        self.min_ball_area.setValue(MIN_BALL_AREA_PX)
+        self.min_ball_area.setSingleStep(10)
+        self.min_ball_area.setSuffix(" 像素")
+        ball_layout.addRow("最小球面積:", self.min_ball_area)
+        
+        self.max_ball_area = QSpinBox()
+        self.max_ball_area.setRange(100, 10000)
+        self.max_ball_area.setValue(MAX_BALL_AREA_PX)
+        self.max_ball_area.setSingleStep(100)
+        self.max_ball_area.setSuffix(" 像素")
+        ball_layout.addRow("最大球面積:", self.max_ball_area)
+        
+        self.min_ball_circularity = QDoubleSpinBox()
+        self.min_ball_circularity.setRange(0.1, 1.0)
+        self.min_ball_circularity.setValue(MIN_BALL_CIRCULARITY)
+        self.min_ball_circularity.setSingleStep(0.05)
+        self.min_ball_circularity.setDecimals(2)
+        ball_layout.addRow("最小圓形度:", self.min_ball_circularity)
+        
+        ball_group.setLayout(ball_layout)
+        detection_layout.addRow(ball_group)
+        
+        tab_widget.addTab(detection_tab, "偵測參數")
+        
+        # === 2. 速度參數 ===
+        speed_tab = QWidget()
+        speed_layout = QFormLayout(speed_tab)
+        
+        self.max_trajectory_points = QSpinBox()
+        self.max_trajectory_points.setRange(10, 500)
+        self.max_trajectory_points.setValue(MAX_TRAJECTORY_POINTS)
+        self.max_trajectory_points.setSingleStep(10)
+        self.max_trajectory_points.setSuffix(" 點")
+        speed_layout.addRow("最大軌跡點數:", self.max_trajectory_points)
+        
+        self.speed_smoothing_factor = QDoubleSpinBox()
+        self.speed_smoothing_factor.setRange(0.01, 1.0)
+        self.speed_smoothing_factor.setValue(SPEED_SMOOTHING_FACTOR)
+        self.speed_smoothing_factor.setSingleStep(0.05)
+        self.speed_smoothing_factor.setDecimals(2)
+        speed_layout.addRow("速度平滑因子:", self.speed_smoothing_factor)
+        
+        # 中心線參數
+        center_group = QGroupBox("中心線檢測參數")
+        center_layout = QFormLayout()
+        
+        self.center_line_width = QSpinBox()
+        self.center_line_width.setRange(50, 1000)
+        self.center_line_width.setValue(CENTER_LINE_WIDTH_PIXELS)
+        self.center_line_width.setSingleStep(50)
+        self.center_line_width.setSuffix(" 像素")
+        center_layout.addRow("中心線寬度:", self.center_line_width)
+        
+        self.center_detection_cooldown = QDoubleSpinBox()
+        self.center_detection_cooldown.setRange(0.001, 0.5)
+        self.center_detection_cooldown.setValue(CENTER_DETECTION_COOLDOWN_S)
+        self.center_detection_cooldown.setSingleStep(0.005)
+        self.center_detection_cooldown.setDecimals(3)
+        self.center_detection_cooldown.setSuffix(" 秒")
+        center_layout.addRow("過網檢測冷卻:", self.center_detection_cooldown)
+        
+        center_group.setLayout(center_layout)
+        speed_layout.addRow(center_group)
+        
+        tab_widget.addTab(speed_tab, "速度參數")
+        
+        # === 3. 視覺化參數 ===
+        visual_tab = QWidget()
+        visual_layout = QFormLayout(visual_tab)
+        
+        self.visualization_draw_interval = QSpinBox()
+        self.visualization_draw_interval.setRange(1, 10)
+        self.visualization_draw_interval.setValue(VISUALIZATION_DRAW_INTERVAL)
+        self.visualization_draw_interval.setSingleStep(1)
+        self.visualization_draw_interval.setSuffix(" 幀")
+        visual_layout.addRow("繪製間隔:", self.visualization_draw_interval)
+        
+        # 顏色配置
+        color_group = QGroupBox("顏色設定")
+        color_layout = QGridLayout()
+        
+        # 使用自定義顏色按鈕
+        self.trajectory_color_btn = ColorButton(TRAJECTORY_COLOR_BGR)
+        self.ball_color_btn = ColorButton(BALL_COLOR_BGR)
+        self.roi_color_btn = ColorButton(ROI_COLOR_BGR)
+        self.speed_text_color_btn = ColorButton(SPEED_TEXT_COLOR_BGR)
+        self.fps_text_color_btn = ColorButton(FPS_TEXT_COLOR_BGR)
+        self.center_line_color_btn = ColorButton(CENTER_LINE_COLOR_BGR)
+        self.net_speed_text_color_btn = ColorButton(NET_SPEED_TEXT_COLOR_BGR)
+        
+        # 配置網格佈局
+        color_layout.addWidget(QLabel("軌跡顏色:"), 0, 0)
+        color_layout.addWidget(self.trajectory_color_btn, 0, 1)
+        color_layout.addWidget(QLabel("球體顏色:"), 0, 2)
+        color_layout.addWidget(self.ball_color_btn, 0, 3)
+        
+        color_layout.addWidget(QLabel("ROI 顏色:"), 1, 0)
+        color_layout.addWidget(self.roi_color_btn, 1, 1)
+        color_layout.addWidget(QLabel("速度文字顏色:"), 1, 2)
+        color_layout.addWidget(self.speed_text_color_btn, 1, 3)
+        
+        color_layout.addWidget(QLabel("FPS 文字顏色:"), 2, 0)
+        color_layout.addWidget(self.fps_text_color_btn, 2, 1)
+        color_layout.addWidget(QLabel("中心線顏色:"), 2, 2)
+        color_layout.addWidget(self.center_line_color_btn, 2, 3)
+        
+        color_layout.addWidget(QLabel("網速文字顏色:"), 3, 0)
+        color_layout.addWidget(self.net_speed_text_color_btn, 3, 1)
+        
+        color_group.setLayout(color_layout)
+        visual_layout.addRow(color_group)
+        
+        # 添加恢復預設值按鈕
+        reset_btn = QPushButton("恢復預設值")
+        reset_btn.clicked.connect(self.resetToDefaults)
+        visual_layout.addRow("", reset_btn)
+        
+        tab_widget.addTab(visual_tab, "視覺化參數")
+        
+        main_layout.addWidget(tab_widget)
+        
+        scroll_area.setWidget(settings_widget)
+        
+        layout = QVBoxLayout()
+        layout.addWidget(scroll_area)
+        self.setLayout(layout)
+        
+    def resetToDefaults(self):
+        """恢復所有參數為預設值"""
+        # 偵測參數
+        self.detection_timeout.setValue(DEFAULT_DETECTION_TIMEOUT)
+        self.roi_start_ratio.setValue(DEFAULT_ROI_START_RATIO)
+        self.roi_end_ratio.setValue(DEFAULT_ROI_END_RATIO)
+        self.roi_bottom_ratio.setValue(DEFAULT_ROI_BOTTOM_RATIO)
+        self.min_ball_area.setValue(MIN_BALL_AREA_PX)
+        self.max_ball_area.setValue(MAX_BALL_AREA_PX)
+        self.min_ball_circularity.setValue(MIN_BALL_CIRCULARITY)
+        
+        # 速度參數
+        self.max_trajectory_points.setValue(MAX_TRAJECTORY_POINTS)
+        self.speed_smoothing_factor.setValue(SPEED_SMOOTHING_FACTOR)
+        self.center_line_width.setValue(CENTER_LINE_WIDTH_PIXELS)
+        self.center_detection_cooldown.setValue(CENTER_DETECTION_COOLDOWN_S)
+        
+        # 視覺化參數
+        self.visualization_draw_interval.setValue(VISUALIZATION_DRAW_INTERVAL)
+        
+        # 顏色設定
+        self.trajectory_color_btn.color_bgr = TRAJECTORY_COLOR_BGR
+        self.trajectory_color_btn.updateColor()
+        self.ball_color_btn.color_bgr = BALL_COLOR_BGR
+        self.ball_color_btn.updateColor()
+        self.roi_color_btn.color_bgr = ROI_COLOR_BGR
+        self.roi_color_btn.updateColor()
+        self.speed_text_color_btn.color_bgr = SPEED_TEXT_COLOR_BGR
+        self.speed_text_color_btn.updateColor()
+        self.fps_text_color_btn.color_bgr = FPS_TEXT_COLOR_BGR
+        self.fps_text_color_btn.updateColor()
+        self.center_line_color_btn.color_bgr = CENTER_LINE_COLOR_BGR
+        self.center_line_color_btn.updateColor()
+        self.net_speed_text_color_btn.color_bgr = NET_SPEED_TEXT_COLOR_BGR
+        self.net_speed_text_color_btn.updateColor()
+        
+    def getParameters(self):
+        """獲取所有參數值"""
+        return {
+            "detection_timeout": self.detection_timeout.value(),
+            "roi_start_ratio": self.roi_start_ratio.value(),
+            "roi_end_ratio": self.roi_end_ratio.value(),
+            "roi_bottom_ratio": self.roi_bottom_ratio.value(),
+            "max_trajectory_points": self.max_trajectory_points.value(),
+            "speed_smoothing_factor": self.speed_smoothing_factor.value(),
+            "min_ball_area": self.min_ball_area.value(),
+            "max_ball_area": self.max_ball_area.value(),
+            "min_ball_circularity": self.min_ball_circularity.value(),
+            "center_line_width": self.center_line_width.value(),
+            "center_detection_cooldown": self.center_detection_cooldown.value(),
+            "visualization_draw_interval": self.visualization_draw_interval.value(),
+            "trajectory_color": self.trajectory_color_btn.getColorBGR(),
+            "ball_color": self.ball_color_btn.getColorBGR(),
+            "roi_color": self.roi_color_btn.getColorBGR(),
+            "speed_text_color": self.speed_text_color_btn.getColorBGR(),
+            "fps_text_color": self.fps_text_color_btn.getColorBGR(),
+            "center_line_color": self.center_line_color_btn.getColorBGR(),
+            "net_speed_text_color": self.net_speed_text_color_btn.getColorBGR()
+        }
 
 
 class ResultsViewer(QWidget):
@@ -441,7 +767,7 @@ class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
         self.setWindowTitle("乒乓球速度追蹤器")
-        self.setMinimumSize(1000, 700)
+        self.setMinimumSize(1200, 800)
         self.initUI()
         
         # 狀態變數
@@ -461,9 +787,11 @@ class MainWindow(QMainWindow):
         self.tabs = QTabWidget()
         self.recording_tab = QWidget()
         self.analysis_tab = QWidget()
+        self.advanced_tab = QWidget()
         
         self.tabs.addTab(self.recording_tab, "錄影")
         self.tabs.addTab(self.analysis_tab, "分析")
+        self.tabs.addTab(self.advanced_tab, "進階設定")
         
         main_layout.addWidget(self.tabs)
         
@@ -472,6 +800,9 @@ class MainWindow(QMainWindow):
         
         # 設置分析標籤頁
         self.setup_analysis_tab()
+        
+        # 設置進階設定標籤頁
+        self.setup_advanced_tab()
         
         # 底部狀態欄
         self.status_bar = self.statusBar()
@@ -505,11 +836,20 @@ class MainWindow(QMainWindow):
         
         self.camera_select = QComboBox()
         self.camera_select.addItem("預設相機", DEFAULT_CAMERA_INDEX)
+        # 嘗試查找可用攝像頭
+        self.refreshCameraList()
         camera_layout.addRow("選擇相機:", self.camera_select)
+        
+        # 添加刷新相機列表按鈕
+        refresh_btn = QPushButton("刷新相機列表")
+        refresh_btn.clicked.connect(self.refreshCameraList)
+        camera_layout.addRow("", refresh_btn)
         
         self.resolution_select = QComboBox()
         self.resolution_select.addItem("HD (1280x720)", (1280, 720))
         self.resolution_select.addItem("Full HD (1920x1080)", (1920, 1080))
+        self.resolution_select.addItem("4K UHD (3840x2160)", (3840, 2160))
+        self.resolution_select.addItem("Low Res (640x480)", (640, 480))
         camera_layout.addRow("解析度:", self.resolution_select)
         
         self.fps_select = QSpinBox()
@@ -568,6 +908,7 @@ class MainWindow(QMainWindow):
         5. 錄製完成後可直接進行分析
         
         提示：將相機放置在乒乓球台側面，確保畫面中能完整看到球的軌跡和網子位置。
+        可在「進階設定」標籤頁中調整更多參數。
         """
         
         instruction_label = QLabel(instructions)
@@ -618,6 +959,7 @@ class MainWindow(QMainWindow):
         self.table_length_input = QDoubleSpinBox()
         self.table_length_input.setRange(100, 300)
         self.table_length_input.setValue(DEFAULT_TABLE_LENGTH_CM)
+        self.table_length_input.setSingleStep(1)
         self.table_length_input.setSuffix(" cm")
         settings_layout.addRow("球台長度:", self.table_length_input)
         
@@ -630,12 +972,14 @@ class MainWindow(QMainWindow):
         self.near_width_input = QDoubleSpinBox()
         self.near_width_input.setRange(10, 100)
         self.near_width_input.setValue(NEAR_SIDE_WIDTH_CM_DEFAULT)
+        self.near_width_input.setSingleStep(1)
         self.near_width_input.setSuffix(" cm")
         settings_layout.addRow("近端寬度:", self.near_width_input)
         
         self.far_width_input = QDoubleSpinBox()
         self.far_width_input.setRange(10, 100)
         self.far_width_input.setValue(FAR_SIDE_WIDTH_CM_DEFAULT)
+        self.far_width_input.setSingleStep(1)
         self.far_width_input.setSuffix(" cm")
         settings_layout.addRow("遠端寬度:", self.far_width_input)
         
@@ -651,10 +995,12 @@ class MainWindow(QMainWindow):
         playback_layout = QHBoxLayout()
         
         self.playback_speed_select = QComboBox()
+        self.playback_speed_select.addItem("0.25x", 0.25)
         self.playback_speed_select.addItem("0.5x", 0.5)
         self.playback_speed_select.addItem("1.0x", 1.0)
         self.playback_speed_select.addItem("2.0x", 2.0)
-        self.playback_speed_select.setCurrentIndex(1)  # 預設 1.0x
+        self.playback_speed_select.addItem("4.0x", 4.0)
+        self.playback_speed_select.setCurrentIndex(2)  # 預設 1.0x
         playback_layout.addWidget(QLabel("播放速度:"))
         playback_layout.addWidget(self.playback_speed_select)
         
@@ -717,7 +1063,59 @@ class MainWindow(QMainWindow):
         self.analysis_thread.analysis_complete.connect(self.show_analysis_results)
         self.analysis_thread.error_occurred.connect(self.show_error)
         self.analysis_thread.progress_update.connect(self.update_analysis_progress)
+    
+    def setup_advanced_tab(self):
+        """設置進階設定標籤頁"""
+        layout = QVBoxLayout()
         
+        # 進階設定說明
+        description_label = QLabel("""
+        下方提供更詳細的參數控制，適合進階使用者調整。
+        請注意，不恰當的設定可能會影響分析準確度。
+        若不確定參數含義，建議保留預設值。
+        """)
+        description_label.setWordWrap(True)
+        layout.addWidget(description_label)
+        
+        # 進階設定元件
+        self.advanced_settings = AdvancedSettingsWidget()
+        layout.addWidget(self.advanced_settings)
+        
+        # 添加配置檔案存取功能
+        config_group = QGroupBox("配置檔管理")
+        config_layout = QHBoxLayout()
+        
+        self.save_config_btn = QPushButton("保存當前配置")
+        self.save_config_btn.clicked.connect(self.save_configuration)
+        
+        self.load_config_btn = QPushButton("載入配置檔")
+        self.load_config_btn.clicked.connect(self.load_configuration)
+        
+        config_layout.addWidget(self.save_config_btn)
+        config_layout.addWidget(self.load_config_btn)
+        
+        config_group.setLayout(config_layout)
+        layout.addWidget(config_group)
+        
+        self.advanced_tab.setLayout(layout)
+        
+    def refreshCameraList(self):
+        """刷新相機列表"""
+        current_index = self.camera_select.currentIndex()
+        self.camera_select.clear()
+        self.camera_select.addItem("預設相機", DEFAULT_CAMERA_INDEX)
+        
+        # 嘗試尋找可用的相機
+        for i in range(10):  # 檢查前10個索引
+            cap = cv2.VideoCapture(i)
+            if cap.isOpened():
+                cap.release()
+                self.camera_select.addItem(f"相機 {i}", i)
+        
+        # 嘗試恢復之前的選擇
+        if current_index >= 0 and current_index < self.camera_select.count():
+            self.camera_select.setCurrentIndex(current_index)
+    
     def update_frame(self, frame):
         """更新相機預覽"""
         h, w, ch = frame.shape
@@ -840,7 +1238,7 @@ class MainWindow(QMainWindow):
     
     def prepare_analysis(self):
         """準備分析"""
-        # 收集分析參數
+        # 收集基本分析參數
         self.analysis_thread.set_parameters(
             video_path=self.current_video_path,
             output_folder=self.current_output_folder,
@@ -851,6 +1249,10 @@ class MainWindow(QMainWindow):
             far_width_cm=self.far_width_input.value(),
             debug_mode=self.debug_mode_checkbox.isChecked()
         )
+        
+        # 收集進階參數
+        advanced_params = self.advanced_settings.getParameters()
+        self.analysis_thread.set_advanced_parameters(advanced_params)
         
         # 設置播放速度
         self.change_playback_speed()
@@ -892,6 +1294,76 @@ class MainWindow(QMainWindow):
         self.results_viewer.update_results(result_data, self.current_output_folder)
         self.status_bar.showMessage("分析完成")
     
+    def save_configuration(self):
+        """保存當前設定到配置檔"""
+        config_file, _ = QFileDialog.getSaveFileName(
+            self, "保存配置檔", "", "配置檔 (*.json)"
+        )
+        
+        if not config_file:
+            return
+            
+        try:
+            import json
+            config = {
+                # 基本設定
+                "table_length_cm": self.table_length_input.value(),
+                "net_crossing_direction": self.crossing_direction_select.currentData(),
+                "near_width_cm": self.near_width_input.value(),
+                "far_width_cm": self.far_width_input.value(),
+                "debug_mode": self.debug_mode_checkbox.isChecked(),
+                # 進階設定
+                "advanced": self.advanced_settings.getParameters()
+            }
+            
+            with open(config_file, 'w') as f:
+                json.dump(config, f, indent=4)
+                
+            self.status_bar.showMessage(f"配置已保存: {config_file}")
+            QMessageBox.information(self, "成功", "配置已成功保存")
+        except Exception as e:
+            self.show_error(f"保存配置時發生錯誤: {str(e)}")
+    
+    def load_configuration(self):
+        """從配置檔載入設定"""
+        config_file, _ = QFileDialog.getOpenFileName(
+            self, "載入配置檔", "", "配置檔 (*.json)"
+        )
+        
+        if not config_file:
+            return
+            
+        try:
+            import json
+            with open(config_file, 'r') as f:
+                config = json.load(f)
+                
+            # 套用基本設定
+            if "table_length_cm" in config:
+                self.table_length_input.setValue(config["table_length_cm"])
+                
+            if "net_crossing_direction" in config:
+                index = self.crossing_direction_select.findData(config["net_crossing_direction"])
+                if index >= 0:
+                    self.crossing_direction_select.setCurrentIndex(index)
+                    
+            if "near_width_cm" in config:
+                self.near_width_input.setValue(config["near_width_cm"])
+                
+            if "far_width_cm" in config:
+                self.far_width_input.setValue(config["far_width_cm"])
+                
+            if "debug_mode" in config:
+                self.debug_mode_checkbox.setChecked(config["debug_mode"])
+            
+            # 暫時不處理進階設定，因為目前還未實作 AdvancedSettingsWidget.setParameters 方法
+            # 這可以在後續版本中添加
+                
+            self.status_bar.showMessage(f"配置已載入: {config_file}")
+            QMessageBox.information(self, "成功", "配置已成功載入")
+        except Exception as e:
+            self.show_error(f"載入配置時發生錯誤: {str(e)}")
+        
     def show_error(self, error_message):
         """顯示錯誤訊息"""
         QMessageBox.critical(self, "錯誤", error_message)
@@ -911,6 +1383,10 @@ class MainWindow(QMainWindow):
 
 if __name__ == "__main__":
     app = QApplication(sys.argv)
+    
+    # 設置應用程式風格
+    app.setStyle("Fusion")
+    
     window = MainWindow()
     window.show()
     sys.exit(app.exec_())

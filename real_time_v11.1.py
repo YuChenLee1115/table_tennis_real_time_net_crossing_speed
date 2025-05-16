@@ -10,19 +10,18 @@ from collections import deque
 import math
 import argparse
 import matplotlib
-matplotlib.use("Agg")  # Must be before importing pyplot
+matplotlib.use("Agg") # Must be before importing pyplot
 import matplotlib.pyplot as plt
 import os
 import csv
 import threading
 import queue
 import concurrent.futures
-import platform
 
 # —— Global Parameter Configuration ——
 # Basic Settings
 DEFAULT_CAMERA_INDEX = 0
-DEFAULT_TARGET_FPS = 120
+DEFAULT_TARGET_FPS = 60
 DEFAULT_FRAME_WIDTH = 1280
 DEFAULT_FRAME_HEIGHT = 720
 DEFAULT_TABLE_LENGTH_CM = 142
@@ -38,7 +37,7 @@ MAX_TRAJECTORY_POINTS = 120
 CENTER_LINE_WIDTH_PIXELS = 55
 CENTER_DETECTION_COOLDOWN_S = 0.01
 MAX_NET_SPEEDS_TO_COLLECT = 27
-NET_CROSSING_DIRECTION_DEFAULT = 'left_to_right'  # 'left_to_right', 'right_to_left', 'both'
+NET_CROSSING_DIRECTION_DEFAULT = 'left_to_right' # 'left_to_right', 'right_to_left', 'both'
 AUTO_STOP_AFTER_COLLECTION = False
 OUTPUT_DATA_FOLDER = 'real_time_output'
 
@@ -46,16 +45,17 @@ OUTPUT_DATA_FOLDER = 'real_time_output'
 NEAR_SIDE_WIDTH_CM_DEFAULT = 29
 FAR_SIDE_WIDTH_CM_DEFAULT = 72
 
-# FMO (Fast Moving Object) Parameters - macOS 優化版
-MAX_PREV_FRAMES_FMO = 5  # 減少記憶體使用
-OPENING_KERNEL_SIZE_FMO = (8, 8)  # 減小核心大小提高性能
-CLOSING_KERNEL_SIZE_FMO = (15, 15)  # 減小核心大小提高性能
+# FMO (Fast Moving Object) Parameters
+MAX_PREV_FRAMES_FMO = 10
+OPENING_KERNEL_SIZE_FMO = (10, 10)
+CLOSING_KERNEL_SIZE_FMO = (25, 25)
 THRESHOLD_VALUE_FMO = 8
 
 # Ball Detection Parameters
 MIN_BALL_AREA_PX = 5
 MAX_BALL_AREA_PX = 10000
 MIN_BALL_CIRCULARITY = 0.4
+
 # Speed Calculation
 SPEED_SMOOTHING_FACTOR = 0.3
 KMH_CONVERSION_FACTOR = 0.036
@@ -75,10 +75,10 @@ CENTER_LINE_COLOR_BGR = (0, 255, 255)
 NET_SPEED_TEXT_COLOR_BGR = (255, 0, 0)
 FONT_SCALE_VIS = 1
 FONT_THICKNESS_VIS = 2
-VISUALIZATION_DRAW_INTERVAL = 3  # 降低視覺化頻率以提高性能
+VISUALIZATION_DRAW_INTERVAL = 2 # Draw full visuals every N frames
 
 # Threading & Queue Parameters
-FRAME_QUEUE_SIZE = 20  # 增加佇列大小以減少等待
+FRAME_QUEUE_SIZE = 10 # For FrameReader
 EVENT_BUFFER_SIZE_CENTER_CROSS = 70
 PREDICTION_LOOKAHEAD_FRAMES = 15
 
