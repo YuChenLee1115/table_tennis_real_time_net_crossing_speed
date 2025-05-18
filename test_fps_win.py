@@ -1,4 +1,5 @@
-# test_fps_win.py
+#!/usr/bin/env python3
+# test_fps_windows.py
 #
 # Windows 專用：以 DirectShow 後端量測攝影機真實 FPS
 # ------------------------------------------------------
@@ -21,10 +22,10 @@ def main():
     # ➤ 1. 用 DirectShow 後端開啟裝置
     cap = cv2.VideoCapture(args.device, cv2.CAP_DSHOW)
 
-    # ➤ 2. 鎖定 MJPG；若驅動不支援可試 'YUY2'
+    # ➤ 2. 鎖定 MJPG（高幀率常見格式）
     cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*'MJPG'))
 
-    # ➤ 3. 設解析度與目標 FPS
+    # ➤ 3. 設解析度與目標 FPS（可自行調整）
     cap.set(cv2.CAP_PROP_FRAME_WIDTH,  1920)
     cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 1080)
     cap.set(cv2.CAP_PROP_FPS,          120)
@@ -39,7 +40,7 @@ def main():
     while time.time() - start < args.seconds:
         ret, _ = cap.read()
         if not ret:
-            print("⚠️  讀流失敗，檢查驅動或訊號")
+            print("⚠️  讀流失敗，檢查裝置占用或訊號")
             break
         frames += 1
 
