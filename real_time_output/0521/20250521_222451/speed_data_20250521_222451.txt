@@ -1,0 +1,19 @@
+Ball Speeds (ROI mode) - Session 1 - 20250521_222451
+---------------------------------------
+0.00s: 84.6 km/h
+1.13s: 49.1 km/h
+1.54s: 0.0 km/h
+2.49s: 27.0 km/h
+2.95s: 97.3 km/h
+4.04s: 50.0 km/h
+4.44s: 78.9 km/h
+5.51s: 0.8 km/h
+5.92s: 96.7 km/h
+7.01s: 49.6 km/h
+7.37s: 71.9 km/h
+7.82s: 19.3 km/h
+---------------------------------------
+Total Points: 12
+Average Speed: 52.1 km/h
+Maximum Speed: 97.3 km/h
+Minimum Speed: 0.0 km/h

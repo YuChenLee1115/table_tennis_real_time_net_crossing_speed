@@ -1,0 +1,8 @@
+ROI Average Speeds - Session 1 - 20250521_225343
+---------------------------------------
+0.00s: 23.4 km/h
+---------------------------------------
+Total ROI Passes: 1
+Average Speed: 23.4 km/h
+Maximum Speed: 23.4 km/h
+Minimum Speed: 23.4 km/h

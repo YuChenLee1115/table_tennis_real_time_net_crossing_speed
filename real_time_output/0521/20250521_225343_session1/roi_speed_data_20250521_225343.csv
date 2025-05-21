@@ -1,0 +1,8 @@
+Timestamp,Pass Number,Relative Time (s),ROI Avg Speed (km/h)
+20250521_225343,1,0.00,23.4
+
+Statistic,Value
+Total ROI Passes,1
+Average Speed (km/h),23.4
+Maximum Speed (km/h),23.4
+Minimum Speed (km/h),23.4

@@ -1,0 +1,25 @@
+Table Tennis Speed Record - right_to_left Direction - Session 1 - 20250521_224530
+---------------------------------------
+0.00s: 85.0 km/h
+1.57s: 99.1 km/h
+2.95s: 97.8 km/h
+4.44s: 79.6 km/h
+5.92s: 97.2 km/h
+8.91s: 103.3 km/h
+10.43s: 116.3 km/h
+13.36s: 107.3 km/h
+14.91s: 100.6 km/h
+17.85s: 106.1 km/h
+22.47s: 101.7 km/h
+24.01s: 9.0 km/h
+25.33s: 97.3 km/h
+26.89s: 101.1 km/h
+28.34s: 125.6 km/h
+29.42s: 0.3 km/h
+29.86s: 27.4 km/h
+31.13s: 102.6 km/h
+---------------------------------------
+Total Count: 18
+Average Speed: 86.5 km/h
+Maximum Speed: 125.6 km/h
+Minimum Speed: 0.3 km/h
