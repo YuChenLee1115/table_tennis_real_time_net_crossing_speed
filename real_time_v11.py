@@ -21,23 +21,23 @@ import concurrent.futures
 # —— Global Parameter Configuration ——
 # Basic Settings
 DEFAULT_CAMERA_INDEX = 0
-DEFAULT_TARGET_FPS = 120
-DEFAULT_FRAME_WIDTH = 1920
-DEFAULT_FRAME_HEIGHT = 1080
-DEFAULT_TABLE_LENGTH_CM = 142
+DEFAULT_TARGET_FPS = 60
+DEFAULT_FRAME_WIDTH = 1280
+DEFAULT_FRAME_HEIGHT = 720
+DEFAULT_TABLE_LENGTH_CM = 94
 
 # Detection Parameters
-DEFAULT_DETECTION_TIMEOUT = 0.2
+DEFAULT_DETECTION_TIMEOUT = 0.3
 DEFAULT_ROI_START_RATIO = 0.4
 DEFAULT_ROI_END_RATIO = 0.6
-DEFAULT_ROI_BOTTOM_RATIO = 0.8
+DEFAULT_ROI_BOTTOM_RATIO = 0.55
 MAX_TRAJECTORY_POINTS = 120
 
 # Center Line Detection
-CENTER_LINE_WIDTH_PIXELS = 55
-CENTER_DETECTION_COOLDOWN_S = 0.01
-MAX_NET_SPEEDS_TO_COLLECT = 27
-NET_CROSSING_DIRECTION_DEFAULT = 'left_to_right' # 'left_to_right', 'right_to_left', 'both'
+CENTER_LINE_WIDTH_PIXELS = 1000
+CENTER_DETECTION_COOLDOWN_S = 0.001
+MAX_NET_SPEEDS_TO_COLLECT = 100
+NET_CROSSING_DIRECTION_DEFAULT = 'right_to_left' # 'left_to_right', 'right_to_left', 'both'
 AUTO_STOP_AFTER_COLLECTION = False
 OUTPUT_DATA_FOLDER = 'real_time_output'
 
@@ -47,14 +47,14 @@ FAR_SIDE_WIDTH_CM_DEFAULT = 72
 
 # FMO (Fast Moving Object) Parameters
 MAX_PREV_FRAMES_FMO = 10
-OPENING_KERNEL_SIZE_FMO = (10, 10)
+OPENING_KERNEL_SIZE_FMO = (12, 12)
 CLOSING_KERNEL_SIZE_FMO = (25, 25)
-THRESHOLD_VALUE_FMO = 8
+THRESHOLD_VALUE_FMO = 9
 
 # Ball Detection Parameters
-MIN_BALL_AREA_PX = 5
+MIN_BALL_AREA_PX = 10
 MAX_BALL_AREA_PX = 10000
-MIN_BALL_CIRCULARITY = 0.4
+MIN_BALL_CIRCULARITY = 0.32
 # Speed Calculation
 SPEED_SMOOTHING_FACTOR = 0.3
 KMH_CONVERSION_FACTOR = 0.036
@@ -77,9 +77,9 @@ FONT_THICKNESS_VIS = 2
 VISUALIZATION_DRAW_INTERVAL = 2 # Draw full visuals every N frames
 
 # Threading & Queue Parameters
-FRAME_QUEUE_SIZE = 10 # For FrameReader
-EVENT_BUFFER_SIZE_CENTER_CROSS = 70
-PREDICTION_LOOKAHEAD_FRAMES = 15
+FRAME_QUEUE_SIZE = 30 # For FrameReader
+EVENT_BUFFER_SIZE_CENTER_CROSS = 200
+PREDICTION_LOOKAHEAD_FRAMES = 10
 
 # Debug
 DEBUG_MODE_DEFAULT = False
@@ -130,7 +130,7 @@ class FrameReader:
         self.video_source = video_source
         self.target_fps = target_fps
         self.use_video_file = use_video_file
-        self.cap = cv2.VideoCapture(self.video_source)
+        self.cap = cv2.VideoCapture(self.video_source, cv2.CAP_AVFOUNDATION)
         self._configure_capture(frame_width, frame_height)
 
         self.frame_queue = queue.Queue(maxsize=FRAME_QUEUE_SIZE)
@@ -488,8 +488,12 @@ class PingPongSpeedTracker:
             self.last_ball_x_global = ball_x_global
             return
 
+        # 幾乎完全忽略冷卻時間，對於右到左方向
         time_since_last_net_cross = current_timestamp - self.last_net_crossing_detection_time
-        if time_since_last_net_cross < CENTER_DETECTION_COOLDOWN_S:
+        
+        # 對右到左移動幾乎無冷卻時間
+        if time_since_last_net_cross < 0.00001 and ball_x_global > self.last_ball_x_global:
+            # 只有左到右移動才考慮冷卻
             self.last_ball_x_global = ball_x_global
             return
 
@@ -497,98 +501,143 @@ class PingPongSpeedTracker:
         self.last_ball_x_global = ball_x_global
 
     def _record_potential_crossing(self, ball_x_global, current_timestamp):
-        # Actual crossing
-        crossed_l_to_r = (self.last_ball_x_global < self.center_line_end_x and ball_x_global >= self.center_line_end_x)
-        crossed_r_to_l = (self.last_ball_x_global > self.center_line_start_x and ball_x_global <= self.center_line_start_x)
+        # 使整個畫面都成為檢測區域
+        center_line_width = self.frame_width * 0.9  # 90%的畫面寬度
         
-        actual_crossing_detected = False
-        if self.net_crossing_direction == 'left_to_right' and crossed_l_to_r: actual_crossing_detected = True
-        elif self.net_crossing_direction == 'right_to_left' and crossed_r_to_l: actual_crossing_detected = True
-        elif self.net_crossing_direction == 'both' and (crossed_l_to_r or crossed_r_to_l): actual_crossing_detected = True
-
-        if actual_crossing_detected and self.current_ball_speed_kmh > 0:
+        # 更新檢測邊界
+        self.center_line_start_x = self.center_x_global - center_line_width // 2
+        self.center_line_end_x = self.center_x_global + center_line_width // 2
+        
+        # 專注於右到左的穿越，使用極其寬鬆的條件
+        # 檢測任何右到左的移動趨勢，不僅僅是越過中心線
+        
+        crossed_r_to_l = False
+        # 標準穿越檢測：從右側越過中心
+        if self.last_ball_x_global >= self.center_x_global and ball_x_global < self.center_x_global:
+            crossed_r_to_l = True
+            print(f"標準穿越檢測：球從 {self.last_ball_x_global} 移動到 {ball_x_global}")
+        
+        # 趨勢檢測：向左移動超過一定閾值
+        elif self.last_ball_x_global is not None and (self.last_ball_x_global - ball_x_global) > 5:
+            # 球正在向左移動，且位於右半邊
+            if ball_x_global > self.center_x_global * 0.8:
+                crossed_r_to_l = True
+                print(f"趨勢檢測：球從 {self.last_ball_x_global} 向左移動到 {ball_x_global}")
+        
+        # 任何右到左的檢測都立即記錄
+        if crossed_r_to_l and self.current_ball_speed_kmh > 0:
+            print(f"右到左穿越：{ball_x_global} @ {current_timestamp}, 速度：{self.current_ball_speed_kmh:.1f}")
             event = EventRecord(ball_x_global, current_timestamp, self.current_ball_speed_kmh, predicted=False)
             self.event_buffer_center_cross.append(event)
-            # Actual crossings are processed immediately or soon by _process_crossing_events
-            return # No need for prediction if actual crossing happened
-
-        # Predictive crossing (simplified)
+        
+        # 多重預測系統：使用不同的未來時間點
         if len(self.trajectory) >= 2 and self.current_ball_speed_kmh > 0:
-            # Predict PREDICTION_LOOKAHEAD_FRAMES frames into the future
-            # Based on current x-velocity
             pt1_x, _, pt1_t = self.trajectory[-2]
             pt2_x, _, pt2_t = self.trajectory[-1]
             delta_t = pt2_t - pt1_t
+            
             if delta_t > 0:
                 vx_pixels_per_time_unit = (pt2_x - pt1_x) / delta_t
                 
-                # time_unit here is seconds if monotonic(), or frame_interval if using frame counts
-                # Assuming current_timestamp and pt_t are comparable units
-                # Project for a short duration, e.g., PREDICTION_LOOKAHEAD_FRAMES * (1/fps)
-                prediction_horizon_time = PREDICTION_LOOKAHEAD_FRAMES / self.display_fps if self.display_fps > 0 else 0.1
-                
-                predicted_x_future = ball_x_global + vx_pixels_per_time_unit * prediction_horizon_time
-                predicted_timestamp_future = current_timestamp + prediction_horizon_time
-
-                predict_l_to_r = (ball_x_global < self.center_x_global and predicted_x_future >= self.center_x_global)
-                predict_r_to_l = (ball_x_global > self.center_x_global and predicted_x_future <= self.center_x_global)
-                
-                prediction_valid_for_direction = False
-                if self.net_crossing_direction == 'left_to_right' and predict_l_to_r: prediction_valid_for_direction = True
-                elif self.net_crossing_direction == 'right_to_left' and predict_r_to_l: prediction_valid_for_direction = True
-                elif self.net_crossing_direction == 'both' and (predict_l_to_r or predict_r_to_l): prediction_valid_for_direction = True
-
-                if prediction_valid_for_direction:
-                    # Avoid duplicate predictions too close in time
-                    can_add_prediction = True
-                    for ev in self.event_buffer_center_cross:
-                        if ev.predicted and abs(ev.timestamp - predicted_timestamp_future) < 0.1: # 100ms
-                            can_add_prediction = False
-                            break
-                    if can_add_prediction:
-                        event = EventRecord(predicted_x_future, predicted_timestamp_future, self.current_ball_speed_kmh, predicted=True)
-                        self.event_buffer_center_cross.append(event)
+                # 球向左移動
+                if vx_pixels_per_time_unit < 0 and ball_x_global > self.center_x_global * 0.6:
+                    # 多重時間點預測：非常激進
+                    for prediction_factor in [0.5, 1, 1.5, 2, 2.5, 3]:
+                        prediction_horizon_time = prediction_factor / self.display_fps if self.display_fps > 0 else 0.01
+                        predicted_x_future = ball_x_global + vx_pixels_per_time_unit * prediction_horizon_time
+                        predicted_timestamp_future = current_timestamp + prediction_horizon_time
+                        
+                        # 如果預測位置在中心線左側或接近中心線
+                        if predicted_x_future <= self.center_x_global or \
+                        (ball_x_global > self.center_x_global and predicted_x_future < ball_x_global):
+                            
+                            # 避免重複預測
+                            can_add_prediction = True
+                            for ev in self.event_buffer_center_cross:
+                                if ev.predicted and abs(ev.timestamp - predicted_timestamp_future) < 0.05:
+                                    can_add_prediction = False
+                                    break
+                            
+                            if can_add_prediction:
+                                print(f"預測穿越 {prediction_factor}x：{predicted_x_future} @ {predicted_timestamp_future}")
+                                event = EventRecord(predicted_x_future, predicted_timestamp_future, 
+                                                self.current_ball_speed_kmh, predicted=True)
+                                self.event_buffer_center_cross.append(event)
+                                
+                    # 額外的預測：基於加速度
+                    if len(self.trajectory) >= 3:
+                        pt0_x, _, pt0_t = self.trajectory[-3]
+                        vel1 = (pt1_x - pt0_x) / (pt1_t - pt0_t) if (pt1_t - pt0_t) > 0 else 0
+                        vel2 = (pt2_x - pt1_x) / (pt2_t - pt1_t) if (pt2_t - pt1_t) > 0 else 0
+                        
+                        # 加速度（每時間單位速度變化）
+                        accel = (vel2 - vel1) / ((pt2_t - pt0_t) / 2) if (pt2_t - pt0_t) > 0 else 0
+                        
+                        # 基於加速度的預測（二次方程）
+                        for prediction_factor in [0.5, 1, 1.5]:
+                            prediction_horizon_time = prediction_factor / self.display_fps if self.display_fps > 0 else 0.01
+                            predicted_x_future = ball_x_global + vel2 * prediction_horizon_time + \
+                                            0.5 * accel * prediction_horizon_time * prediction_horizon_time
+                            predicted_timestamp_future = current_timestamp + prediction_horizon_time
+                            
+                            if predicted_x_future <= self.center_x_global:
+                                # 避免重複預測
+                                can_add_prediction = True
+                                for ev in self.event_buffer_center_cross:
+                                    if ev.predicted and abs(ev.timestamp - predicted_timestamp_future) < 0.05:
+                                        can_add_prediction = False
+                                        break
+                                
+                                if can_add_prediction:
+                                    print(f"加速度預測：{predicted_x_future} @ {predicted_timestamp_future}")
+                                    event = EventRecord(predicted_x_future, predicted_timestamp_future, 
+                                                    self.current_ball_speed_kmh, predicted=True)
+                                    self.event_buffer_center_cross.append(event)
 
     def _process_crossing_events(self):
-        # This should be called regularly in the main loop if self.is_counting_active
         if not self.is_counting_active or self.output_generated_for_session:
             return
 
         current_eval_time = time.monotonic()
         if self.use_video_file: current_eval_time = self.frame_counter / self.actual_fps
         
-        events_to_commit = []
-        # Prioritize actual events. If an actual event occurs near a predicted one, the actual one wins.
-        # Iterate through a copy for safe removal/modification
+        # 添加調試輸出
+        if self.debug_mode and self.event_buffer_center_cross:
+            print(f"事件緩衝區中有 {len(self.event_buffer_center_cross)} 個事件需處理")
         
-        processed_indices = []
-        # First, find actual events and mark nearby predictions as handled
+        events_to_commit = []
+        # 優先處理實際事件
         for i, event in enumerate(self.event_buffer_center_cross):
             if event.processed: continue
-            if not event.predicted: # Actual event
+            if not event.predicted:  # 實際事件
                 events_to_commit.append(event)
-                event.processed = True # Mark for removal from buffer or just ignore later
-                # Invalidate nearby predictions
+                event.processed = True  # 標記為已處理
+                # 將附近的預測標記為已處理
                 for j, other_event in enumerate(self.event_buffer_center_cross):
-                    if i !=j and other_event.predicted and not other_event.processed and \
-                       abs(event.timestamp - other_event.timestamp) < 0.2: # 200ms window
-                        other_event.processed = True # This prediction is covered by an actual event
-
-        # Then, process timed-out predictions not covered by actual events
+                    if i != j and other_event.predicted and not other_event.processed and \
+                    abs(event.timestamp - other_event.timestamp) < 0.2:  # 200ms窗口
+                        other_event.processed = True
+        
+        # 極度寬鬆地處理預測事件 - 幾乎立即處理任何預測
         for event in self.event_buffer_center_cross:
             if event.processed: continue
-            if event.predicted and (current_eval_time - event.timestamp) > 0.1: # Prediction considered "due" or "past due"
-                # Prediction horizon (e.g., 0.1s). If current_eval_time is past event.timestamp by this much, commit.
+            # 幾乎立即接受預測 - 等待時間極短
+            if event.predicted and (current_eval_time - event.timestamp) > 0.001:  # 僅1ms等待
                 events_to_commit.append(event)
                 event.processed = True
-
-        # Sort events by timestamp before committing
+        
+        # 按時間戳排序事件
         events_to_commit.sort(key=lambda e: e.timestamp)
-
+        
+        # 添加處理計數
+        processed_count = 0
+        
         for event in events_to_commit:
             if len(self.collected_net_speeds) >= self.max_net_speeds_to_collect:
-                break # Stop if limit reached
-
+                break  # 已達到限制
+            
+            processed_count += 1
+            
             if not self.timing_started_for_session:
                 self.timing_started_for_session = True
                 self.first_ball_crossing_timestamp = event.timestamp
@@ -599,23 +648,26 @@ class PingPongSpeedTracker:
             self.last_recorded_net_speed_kmh = event.speed_kmh
             self.collected_net_speeds.append(event.speed_kmh)
             self.collected_relative_times.append(relative_time)
-            self.last_net_crossing_detection_time = event.timestamp # System time based on monotonic() or frame time
+            self.last_net_crossing_detection_time = event.timestamp
             
-            status_msg = "Pred" if event.predicted else "Actual"
-            print(f"Net Speed #{len(self.collected_net_speeds)}: {event.speed_kmh:.1f} km/h @ {relative_time:.2f}s ({status_msg})")
-
-        # Clean up processed events from buffer (optional, as maxlen handles size)
+            status_msg = "預測" if event.predicted else "實際"
+            print(f"穿越速度 #{len(self.collected_net_speeds)}: {event.speed_kmh:.1f} km/h @ {relative_time:.2f}s ({status_msg})")
+        
+        if self.debug_mode and processed_count > 0:
+            print(f"處理了 {processed_count} 個事件")
+        
+        # 清理已處理的事件
         self.event_buffer_center_cross = deque(
             [e for e in self.event_buffer_center_cross if not e.processed],
             maxlen=EVENT_BUFFER_SIZE_CENTER_CROSS
         )
-
+        
         if len(self.collected_net_speeds) >= self.max_net_speeds_to_collect and not self.output_generated_for_session:
-            print(f"Target {self.max_net_speeds_to_collect} speeds collected. Generating output.")
+            print(f"已收集 {self.max_net_speeds_to_collect} 個速度紀錄。生成輸出中。")
             self._generate_outputs_async()
             self.output_generated_for_session = True
             if AUTO_STOP_AFTER_COLLECTION:
-                self.is_counting_active = False # Optionally stop counting
+                self.is_counting_active = False  # 選擇性停止計數
 
     def _calculate_ball_speed(self):
         if len(self.trajectory) < 2:

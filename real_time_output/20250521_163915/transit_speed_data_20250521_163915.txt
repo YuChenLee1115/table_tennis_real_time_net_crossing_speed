@@ -1,0 +1,37 @@
+Avg R-L Transit Speeds - Session 1 - 20250521_163915
+---------------------------------------
+0.00s: 44.3 km/h
+1.52s: 55.6 km/h
+2.97s: 50.6 km/h
+4.58s: 49.8 km/h
+6.04s: 24.3 km/h
+7.69s: 17.4 km/h
+8.99s: 53.8 km/h
+10.48s: 52.9 km/h
+11.95s: 3.3 km/h
+12.01s: 55.9 km/h
+12.37s: 3.2 km/h
+13.46s: 34.0 km/h
+15.04s: 53.7 km/h
+16.52s: 68.2 km/h
+18.07s: 56.4 km/h
+19.57s: 50.2 km/h
+20.20s: 4.0 km/h
+20.99s: 55.3 km/h
+22.54s: 61.1 km/h
+23.41s: 2.7 km/h
+24.04s: 59.1 km/h
+25.50s: 47.7 km/h
+27.06s: 50.2 km/h
+28.55s: 56.0 km/h
+30.06s: 48.1 km/h
+31.55s: 50.0 km/h
+32.98s: 55.5 km/h
+34.53s: 57.5 km/h
+36.00s: 55.3 km/h
+37.52s: 48.1 km/h
+---------------------------------------
+Total Transits Recorded: 30
+Overall Average Speed: 44.1 km/h
+Maximum Avg Transit Speed: 68.2 km/h
+Minimum Avg Transit Speed: 2.7 km/h

@@ -21,21 +21,21 @@ import concurrent.futures
 # —— Global Parameter Configuration ——
 # Basic Settings
 DEFAULT_CAMERA_INDEX = 0
-DEFAULT_TARGET_FPS = 60
-DEFAULT_FRAME_WIDTH = 1280
-DEFAULT_FRAME_HEIGHT = 720
-DEFAULT_TABLE_LENGTH_CM = 142
+DEFAULT_TARGET_FPS = 120
+DEFAULT_FRAME_WIDTH = 1920
+DEFAULT_FRAME_HEIGHT = 1080
+DEFAULT_TABLE_LENGTH_CM = 94
 
 # Detection Parameters
-DEFAULT_DETECTION_TIMEOUT = 0.2
+DEFAULT_DETECTION_TIMEOUT = 0.15
 DEFAULT_ROI_START_RATIO = 0.4
 DEFAULT_ROI_END_RATIO = 0.6
-DEFAULT_ROI_BOTTOM_RATIO = 0.8
+DEFAULT_ROI_BOTTOM_RATIO = 0.53
 MAX_TRAJECTORY_POINTS = 120
 
 # Center Line Detection
-CENTER_LINE_WIDTH_PIXELS = 55
-CENTER_DETECTION_COOLDOWN_S = 0.01
+CENTER_LINE_WIDTH_PIXELS = 500
+CENTER_DETECTION_COOLDOWN_S = 0.001
 MAX_NET_SPEEDS_TO_COLLECT = 27
 NET_CROSSING_DIRECTION_DEFAULT = 'left_to_right' # 'left_to_right', 'right_to_left', 'both'
 AUTO_STOP_AFTER_COLLECTION = False
@@ -47,14 +47,14 @@ FAR_SIDE_WIDTH_CM_DEFAULT = 72
 
 # FMO (Fast Moving Object) Parameters
 MAX_PREV_FRAMES_FMO = 10
-OPENING_KERNEL_SIZE_FMO = (10, 10)
-CLOSING_KERNEL_SIZE_FMO = (25, 25)
-THRESHOLD_VALUE_FMO = 8
+OPENING_KERNEL_SIZE_FMO = (8, 8)
+CLOSING_KERNEL_SIZE_FMO = (35, 35)
+THRESHOLD_VALUE_FMO = 6
 
 # Ball Detection Parameters
-MIN_BALL_AREA_PX = 5
-MAX_BALL_AREA_PX = 10000
-MIN_BALL_CIRCULARITY = 0.4
+MIN_BALL_AREA_PX = 15
+MAX_BALL_AREA_PX = 30000
+MIN_BALL_CIRCULARITY = 0.3
 
 # Speed Calculation
 SPEED_SMOOTHING_FACTOR = 0.3
@@ -75,12 +75,12 @@ CENTER_LINE_COLOR_BGR = (0, 255, 255)
 NET_SPEED_TEXT_COLOR_BGR = (255, 0, 0)
 FONT_SCALE_VIS = 1
 FONT_THICKNESS_VIS = 2
-VISUALIZATION_DRAW_INTERVAL = 2 # Draw full visuals every N frames
+VISUALIZATION_DRAW_INTERVAL = 6 # Draw full visuals every N frames
 
 # Threading & Queue Parameters
-FRAME_QUEUE_SIZE = 10 # For FrameReader
-EVENT_BUFFER_SIZE_CENTER_CROSS = 70
-PREDICTION_LOOKAHEAD_FRAMES = 15
+FRAME_QUEUE_SIZE = 15 # For FrameReader
+EVENT_BUFFER_SIZE_CENTER_CROSS = 120
+PREDICTION_LOOKAHEAD_FRAMES = 30
 
 # Debug
 DEBUG_MODE_DEFAULT = False
@@ -518,9 +518,9 @@ class PingPongSpeedTracker:
         self.last_ball_x_global = ball_x_global
 
     def _record_potential_crossing(self, ball_x_global, current_timestamp):
-        # Actual crossing
-        crossed_l_to_r = (self.last_ball_x_global < self.center_line_end_x and ball_x_global >= self.center_line_end_x)
-        crossed_r_to_l = (self.last_ball_x_global > self.center_line_start_x and ball_x_global <= self.center_line_start_x)
+        # 更寬鬆的判定邏輯（解決遺漏紀錄）
+        crossed_l_to_r = (self.last_ball_x_global < self.center_x_global and ball_x_global >= self.center_x_global)
+        crossed_r_to_l = (self.last_ball_x_global > self.center_x_global and ball_x_global <= self.center_x_global)
         
         actual_crossing_detected = False
         if self.net_crossing_direction == 'left_to_right' and crossed_l_to_r: actual_crossing_detected = True
@@ -589,7 +589,7 @@ class PingPongSpeedTracker:
         # Then, process timed-out predictions not covered by actual events
         for event in self.event_buffer_center_cross:
             if event.processed: continue
-            if event.predicted and (current_eval_time - event.timestamp) > 0.1:  # Prediction considered "due" or "past due"
+            if event.predicted and (current_eval_time - event.timestamp) > 0.05:  # Prediction considered "due" or "past due"
                 events_to_commit.append(event)
                 event.processed = True
 

@@ -1,0 +1,32 @@
+Avg R-L Transit Speeds - Session 1 - 20250521_155054
+---------------------------------------
+Transit Start 0.00s: 44.2 km/h
+Transit Start 1.57s: 48.8 km/h
+Transit Start 2.94s: 43.1 km/h
+Transit Start 4.44s: 39.7 km/h
+Transit Start 5.91s: 48.9 km/h
+Transit Start 7.38s: 68.1 km/h
+Transit Start 8.91s: 52.1 km/h
+Transit Start 10.43s: 58.2 km/h
+Transit Start 11.87s: 52.1 km/h
+Transit Start 13.36s: 53.3 km/h
+Transit Start 14.91s: 49.8 km/h
+Transit Start 16.34s: 47.9 km/h
+Transit Start 17.86s: 49.1 km/h
+Transit Start 19.41s: 62.1 km/h
+Transit Start 20.93s: 52.3 km/h
+Transit Start 22.47s: 50.4 km/h
+Transit Start 25.33s: 52.7 km/h
+Transit Start 26.89s: 57.7 km/h
+Transit Start 28.34s: 64.0 km/h
+Transit Start 31.15s: 38.8 km/h
+Transit Start 32.44s: 56.3 km/h
+Transit Start 33.83s: 59.8 km/h
+Transit Start 35.15s: 45.9 km/h
+Transit Start 36.45s: 61.8 km/h
+Transit Start 37.82s: 54.9 km/h
+---------------------------------------
+Total Transits Recorded: 25
+Overall Average Speed: 52.5 km/h
+Maximum Avg Transit Speed: 68.1 km/h
+Minimum Avg Transit Speed: 38.8 km/h

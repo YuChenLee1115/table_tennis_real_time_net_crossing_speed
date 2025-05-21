@@ -1,0 +1,10 @@
+Session ID,Timestamp File,Transit Number,Relative Start Time (s),Avg Transit Speed (km/h)
+1,20250521_163243,1,0.00,17.1
+1,20250521_163243,2,11.88,6.8
+1,20250521_163243,3,12.38,5.3
+
+Statistic,Value
+Total Transits Recorded,3
+Overall Average Speed (km/h),9.7
+Maximum Avg Transit Speed (km/h),17.1
+Minimum Avg Transit Speed (km/h),5.3
