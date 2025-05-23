@@ -34,7 +34,7 @@ DEFAULT_ROI_BOTTOM_RATIO = 0.55
 MAX_TRAJECTORY_POINTS = 120
 
 # Center Line Detection Related (MAX_NET_SPEEDS_TO_COLLECT is primary for count)
-MAX_NET_SPEEDS_TO_COLLECT = 100
+MAX_NET_SPEEDS_TO_COLLECT = 30
 NET_CROSSING_DIRECTION_DEFAULT = 'right_to_left' # Focus of this modification
 AUTO_STOP_AFTER_COLLECTION = False
 OUTPUT_DATA_FOLDER = 'real_time_output'

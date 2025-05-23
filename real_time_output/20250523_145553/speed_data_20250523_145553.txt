@@ -1,0 +1,12 @@
+Net Speeds - Session 3 - 20250523_145553
+---------------------------------------
+0.00s: 68.1 km/h
+2.92s: 38.2 km/h
+4.14s: 58.5 km/h
+5.57s: 40.6 km/h
+9.61s: 56.2 km/h
+---------------------------------------
+Total Points: 5
+Average Speed: 52.3 km/h
+Maximum Speed: 68.1 km/h
+Minimum Speed: 38.2 km/h

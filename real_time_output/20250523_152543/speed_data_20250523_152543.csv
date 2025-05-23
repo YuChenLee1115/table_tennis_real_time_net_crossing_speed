@@ -1,0 +1,10 @@
+Session ID,Timestamp File,Point Number,Relative Time (s),Speed (km/h)
+1,20250523_152543,1,0.00,55.1
+1,20250523_152543,2,1.58,34.8
+1,20250523_152543,3,5.99,26.7
+
+Statistic,Value
+Total Points,3
+Average Speed (km/h),38.9
+Maximum Speed (km/h),55.1
+Minimum Speed (km/h),26.7
