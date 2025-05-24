@@ -1,0 +1,14 @@
+{
+  "source_type": "file",
+  "camera_idx": "0",
+  "video_path": "/Users/leeyuchen/Movies/\u684c\u7403data/\u4e16\u58ef\u904b/0523/20250523_25_154722.MP4",
+  "fps": "60",
+  "width": "1280",
+  "height": "720",
+  "table_length": "94",
+  "timeout": "0.3",
+  "direction": "right_to_left",
+  "max_speeds": "30",
+  "debug": false,
+  "output_path": "./real_time_output"
+}
