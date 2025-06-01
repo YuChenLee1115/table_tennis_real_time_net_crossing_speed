@@ -973,7 +973,7 @@ def _video_writer_thread(frame_queue, output_path, fourcc, fps, resolution):
     try:
         out = cv2.VideoWriter(output_path, fourcc, fps, resolution)
         if not out.isOpened():
-            print(f"錯誤：無法創建視頻寫入器，檢查編解碼器是否支援: {fourcc}")
+            print(f"錯誤：無法創建影片寫入器，檢查編解碼器是否支援: {fourcc}")
             return
             
         while True:
@@ -984,12 +984,12 @@ def _video_writer_thread(frame_queue, output_path, fourcc, fps, resolution):
                 out.write(frame)
                 frame_queue.task_done()
             except queue.Empty:
-                print("視頻寫入超時，退出")
+                print("影片寫入超時，退出")
                 break
         out.release()
-        print("視頻寫入完成")
+        print("影片寫入完成")
     except Exception as e:
-        print(f"視頻寫入錯誤: {e}")
+        print(f"影片寫入錯誤: {e}")
 
 def record_video(name, device_index=DEFAULT_CAMERA_INDEX, 
                 resolution=(DEFAULT_FRAME_WIDTH, DEFAULT_FRAME_HEIGHT), 
@@ -1038,8 +1038,8 @@ def record_video(name, device_index=DEFAULT_CAMERA_INDEX,
     
     # 檢查是否成功打開
     if not cap.isOpened():
-        print(f"錯誤: 無法打開索引為 {device_index} 的視頻設備")
-        raise IOError(f"無法打開視頻設備: {device_index}")
+        print(f"錯誤: 無法打開索引為 {device_index} 的影片設備")
+        raise IOError(f"無法打開影片設備: {device_index}")
     
     # 設定 MJPG 格式 (有助於提高幀率)
     cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*'MJPG'))
@@ -1083,10 +1083,10 @@ def record_video(name, device_index=DEFAULT_CAMERA_INDEX,
             continue
     
     if selected_codec is None:
-        print("警告：未找到合適的視頻編碼器，使用默認編碼器")
+        print("警告：未找到合適的影片編碼器，使用默認編碼器")
         selected_codec = 'XVID'
     
-    print(f"使用視頻編碼器: {selected_codec}")
+    print(f"使用影片編碼器: {selected_codec}")
     output_fourcc = cv2.VideoWriter_fourcc(*selected_codec)
     
     # 提高進程優先級，以獲得更好的實時性能
@@ -1129,7 +1129,7 @@ def record_video(name, device_index=DEFAULT_CAMERA_INDEX,
         ret, frame = cap.read()
         
         if not ret:
-            print("無法讀取視頻幀")
+            print("無法讀取影片幀")
             time.sleep(0.1)
             continue
         
@@ -1143,7 +1143,7 @@ def record_video(name, device_index=DEFAULT_CAMERA_INDEX,
             fps_count = 0
             fps_start = time.time()
         
-        # 如果正在錄製，寫入視頻
+        # 如果正在錄製，寫入影片
         if recording and frame_queue is not None and not frame_queue.full():
             frame_queue.put(frame.copy())  # 複製幀以避免引用問題
             frame_times.append(time.time())
@@ -1201,7 +1201,7 @@ def record_video(name, device_index=DEFAULT_CAMERA_INDEX,
                 frames_recorded = 0
                 frame_times = []
                 
-                # 創建新的視頻文件
+                # 創建新的影片文件
                 recording_timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
                 output_filename = f"{name}_{recording_timestamp}.mp4"
                 output_path = os.path.join(folder_path, output_filename)
@@ -1230,7 +1230,7 @@ def record_video(name, device_index=DEFAULT_CAMERA_INDEX,
                 else:
                     actual_recorded_fps = 0
                 
-                # 關閉視頻寫入器
+                # 關閉影片寫入器
                 if frame_queue is not None:
                     frame_queue.put(None)  # 發送終止信號
                     if writer_thread is not None:
@@ -1242,7 +1242,7 @@ def record_video(name, device_index=DEFAULT_CAMERA_INDEX,
                 print(f"錄製時間: {elapsed_time:.2f}秒")
                 print(f"錄製幀數: {frames_recorded}")
                 print(f"實際平均 FPS: {actual_recorded_fps:.2f}fps")
-                print(f"視頻保存為: {output_path}")
+                print(f"影片保存為: {output_path}")
                 
                 # 錄製完成後自動結束錄影階段
                 # 增加錄製計數（以防需要多次錄製）
@@ -1257,7 +1257,7 @@ def record_video(name, device_index=DEFAULT_CAMERA_INDEX,
     cv2.destroyAllWindows()
     
     print("\n錄製完成")
-    print(f"所有視頻保存在: {folder_path}")
+    print(f"所有影片保存在: {folder_path}")
     
     # 回傳資料夾路徑和最後錄製的影片路徑
     return folder_path, output_path

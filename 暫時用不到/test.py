@@ -962,7 +962,7 @@ def record_video(name, device_index=DEFAULT_CAMERA_INDEX,
     print(f"Reported resolution: {actual_width}x{actual_height}")
     print(f"Reported FPS: {actual_fps}fps")
     
-    # 為輸出視頻設定編碼器 - 使用 H.264 以獲得硬體加速
+    # 為輸出影片設定編碼器 - 使用 H.264 以獲得硬體加速
     output_fourcc = cv2.VideoWriter_fourcc(*'avc1')
     
     # 變數初始化
@@ -1008,7 +1008,7 @@ def record_video(name, device_index=DEFAULT_CAMERA_INDEX,
             fps_count = 0
             fps_start = time.time()
         
-        # 如果正在錄製，寫入視頻
+        # 如果正在錄製，寫入影片
         if recording and frame_queue is not None and not frame_queue.full():
             frame_queue.put(frame.copy())  # 複製幀以避免引用問題
             frame_times.append(time.time())
@@ -1066,7 +1066,7 @@ def record_video(name, device_index=DEFAULT_CAMERA_INDEX,
                 frames_recorded = 0
                 frame_times = []
                 
-                # 創建新的視頻文件
+                # 創建新的影片文件
                 recording_timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
                 output_filename = f"{name}_{recording_timestamp}.mp4"
                 output_path = os.path.join(folder_path, output_filename)
@@ -1095,7 +1095,7 @@ def record_video(name, device_index=DEFAULT_CAMERA_INDEX,
                 else:
                     actual_recorded_fps = 0
                 
-                # 關閉視頻寫入器
+                # 關閉影片寫入器
                 if frame_queue is not None:
                     frame_queue.put(None)  # 發送終止信號
                     if writer_thread is not None:

@@ -301,7 +301,7 @@ def main():
     args = parser.parse_args()
     
     if args.video:
-        # 使用視頻文件
+        # 使用影片文件
         tracker = PingPongSpeedTracker(args.video, use_video_file=True)
     else:
         # 使用網絡攝像頭，允許指定相機編號

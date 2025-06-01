@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # high_fps_recorder.py
 #
-# macOS 專用高幀率視頻錄製程式
+# macOS 專用高幀率影片錄製程式
 # ------------------------------------------------------
 
 import cv2
@@ -12,7 +12,7 @@ from datetime import datetime
 
 def record_video(name, device_index=0, resolution=(1920, 1080), target_fps=120, codec='mp4v'):
     """
-    使用 AVFoundation 後端錄製高幀率視頻
+    使用 AVFoundation 後端錄製高幀率影片
     按空白鍵開始/停止錄製
     
     參數:
@@ -20,7 +20,7 @@ def record_video(name, device_index=0, resolution=(1920, 1080), target_fps=120, 
     - device_index: 攝像頭/擷取卡索引
     - resolution: 影片解析度，默認1920x1080 (1080p)
     - target_fps: 目標每秒幀數，默認120fps
-    - codec: 輸出視頻編碼格式，默認'mp4v'
+    - codec: 輸出影片編碼格式，默認'mp4v'
     """
     # 建立時間戳記 (格式: YYYYMMDD_HHMMSS)
     base_timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -34,7 +34,7 @@ def record_video(name, device_index=0, resolution=(1920, 1080), target_fps=120, 
         os.makedirs(folder_path)
         print(f"已創建資料夾: {folder_path}")
     
-    print("=== macOS 高幀率視頻錄製程式 ===")
+    print("=== macOS 高幀率影片錄製程式 ===")
     print(f"使用者: {name}")
     print(f"所有錄製的影片將保存在: {folder_path}")
     print("初始化 AVFoundation 後端...")
@@ -69,7 +69,7 @@ def record_video(name, device_index=0, resolution=(1920, 1080), target_fps=120, 
     print(f"報告的分辨率: {actual_width}x{actual_height}")
     print(f"報告的幀率: {actual_fps}fps")
     
-    # 為輸出視頻設定編解碼器
+    # 為輸出影片設定編解碼器
     output_fourcc = cv2.VideoWriter_fourcc(*codec)
     
     # 變數初始化
@@ -99,7 +99,7 @@ def record_video(name, device_index=0, resolution=(1920, 1080), target_fps=120, 
         ret, frame = cap.read()
         
         if not ret:
-            print("無法讀取視頻幀")
+            print("無法讀取影片幀")
             time.sleep(0.1)
             continue
         
@@ -148,7 +148,7 @@ def record_video(name, device_index=0, resolution=(1920, 1080), target_fps=120, 
         # 顯示預覽
         cv2.imshow('High FPS Camera', frame)
         
-        # 如果正在錄製，寫入視頻
+        # 如果正在錄製，寫入影片
         if recording:
             out.write(frame)
             frame_times.append(time.time())
@@ -176,7 +176,7 @@ def record_video(name, device_index=0, resolution=(1920, 1080), target_fps=120, 
                 frames_recorded = 0
                 frame_times = []
                 
-                # 創建新的視頻文件
+                # 創建新的影片文件
                 recording_timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
                 output_filename = f"{name}_{recording_timestamp}.mp4"
                 output_path = os.path.join(folder_path, output_filename)
@@ -203,7 +203,7 @@ def record_video(name, device_index=0, resolution=(1920, 1080), target_fps=120, 
                 else:
                     actual_recorded_fps = 0
                 
-                # 關閉視頻寫入器
+                # 關閉影片寫入器
                 if out:
                     out.release()
                     out = None
@@ -212,7 +212,7 @@ def record_video(name, device_index=0, resolution=(1920, 1080), target_fps=120, 
                 print(f"錄製時間: {elapsed_time:.2f}秒")
                 print(f"錄製幀數: {frames_recorded}幀")
                 print(f"實際平均幀率: {actual_recorded_fps:.2f}fps")
-                print(f"視頻已保存為: {output_path}")
+                print(f"影片已保存為: {output_path}")
                 print("\n按 '空白鍵' 開始新的錄製")
                 
                 # 增加錄製計數
@@ -229,7 +229,7 @@ def record_video(name, device_index=0, resolution=(1920, 1080), target_fps=120, 
 
 if __name__ == "__main__":
     # 提示使用者輸入姓名
-    print("=== 高幀率視頻錄製程式 ===")
+    print("=== 高幀率影片錄製程式 ===")
     user_name = input("請輸入您的姓名: ")
     
     # 確保姓名是有效的檔案名稱

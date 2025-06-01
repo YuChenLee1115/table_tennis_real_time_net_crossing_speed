@@ -811,10 +811,10 @@ class MainWindow(QMainWindow):
     def setup_recording_tab(self):
         layout = QVBoxLayout()
         
-        # 上半部分：視頻預覽和控制
+        # 上半部分：影片預覽和控制
         top_layout = QHBoxLayout()
         
-        # 視頻預覽
+        # 影片預覽
         self.video_preview = QLabel("相機預覽")
         self.video_preview.setAlignment(Qt.AlignCenter)
         self.video_preview.setMinimumSize(640, 360)
@@ -919,7 +919,7 @@ class MainWindow(QMainWindow):
         
         self.recording_tab.setLayout(layout)
         
-        # 初始化視頻執行緒
+        # 初始化影片執行緒
         self.video_thread = VideoThread()
         self.video_thread.update_frame.connect(self.update_frame)
         self.video_thread.update_fps.connect(self.update_fps)
@@ -932,12 +932,12 @@ class MainWindow(QMainWindow):
         # 分割分析區和結果區
         splitter = QSplitter(Qt.Horizontal)
         
-        # 左側：分析控制和視頻預覽
+        # 左側：分析控制和影片預覽
         analysis_widget = QWidget()
         analysis_layout = QVBoxLayout()
         analysis_widget.setLayout(analysis_layout)
         
-        # 視頻載入控制
+        # 影片載入控制
         load_group = QGroupBox("載入影片")
         load_layout = QHBoxLayout()
         
@@ -1037,7 +1037,7 @@ class MainWindow(QMainWindow):
         
         analysis_layout.addLayout(status_layout)
         
-        # 視頻預覽
+        # 影片預覽
         self.analysis_preview = QLabel("分析預覽")
         self.analysis_preview.setAlignment(Qt.AlignCenter)
         self.analysis_preview.setMinimumSize(640, 360)
@@ -1167,7 +1167,7 @@ class MainWindow(QMainWindow):
     def toggle_camera(self):
         """開始/停止相機預覽"""
         if not self.video_thread.running:
-            # 重新配置視頻執行緒
+            # 重新配置影片執行緒
             camera_index = self.camera_select.currentData()
             target_fps = self.fps_select.value()
             resolution = self.resolution_select.currentData()
