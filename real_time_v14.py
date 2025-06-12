@@ -30,7 +30,7 @@ DEFAULT_TABLE_LENGTH_CM = 94
 DEFAULT_DETECTION_TIMEOUT = 0.3 # From user's v11
 DEFAULT_ROI_START_RATIO = 0.4
 DEFAULT_ROI_END_RATIO = 0.6
-DEFAULT_ROI_BOTTOM_RATIO = 0.55
+DEFAULT_ROI_BOTTOM_RATIO = 0.85
 MAX_TRAJECTORY_POINTS = 120
 
 # Center Line Detection Related (MAX_NET_SPEEDS_TO_COLLECT is primary for count)
@@ -248,7 +248,7 @@ class PingPongSpeedTracker:
         # MODIFIED: New state variables for better crossing detection and reduced duplicates
         self.ball_on_left_of_center = False 
         self.last_committed_crossing_time = 0 
-        self.EFFECTIVE_CROSSING_COOLDOWN_S = 0.3 # Cooldown after a speed is committed (tunable)
+        self.EFFECTIVE_CROSSING_COOLDOWN_S = 0.2 # Cooldown after a speed is committed (tunable)
         self.CENTER_ZONE_WIDTH_PIXELS = self.frame_width * 0.05 # 5% of frame width as a margin around center
 
         self._precalculate_overlay()
@@ -372,7 +372,7 @@ class PingPongSpeedTracker:
             cx_global, cy_global = cx_roi + self.roi_start_x, cy_roi + self.roi_top_y
             distance = math.hypot(cx_global - last_x_global, cy_global - last_y_global)
             ball_info['distance_from_last'] = distance
-            if distance > self.frame_width * 0.2: ball_info['distance_from_last'] = float('inf')
+            if distance > self.frame_width * 0.4: ball_info['distance_from_last'] = float('inf')
             consistency_score = 0
             if len(self.trajectory) >= 2:
                 prev_x_global, prev_y_global, _ = self.trajectory[-2]
@@ -385,9 +385,9 @@ class PingPongSpeedTracker:
                 consistency_score = max(0, cosine_similarity)
             ball_info['consistency'] = consistency_score
         for ball_info in candidates:
-            ball_info['score'] = (0.4 / (1.0 + ball_info['distance_from_last'])) + \
-                                 (0.4 * ball_info['consistency']) + \
-                                 (0.2 * ball_info['circularity'])
+            ball_info['score'] = (0.3 / (1.0 + ball_info['distance_from_last'])) + \
+                                (0.5 * ball_info['consistency']) + \
+                                (0.2 * ball_info['circularity'])
         return max(candidates, key=lambda b: b['score'])
 
     def toggle_counting(self):
@@ -453,41 +453,41 @@ class PingPongSpeedTracker:
             if self.debug_mode: print(f"DEBUG REC: Added ACTUAL event to buffer. Buffer size: {len(self.event_buffer_center_cross)}")
             # self.ball_on_left_of_center will be set to True when this event is *committed*
 
-        # --- Conservative Prediction Logic (Right-to-Left) ---
-        # Only predict if no strict crossing was detected this frame and ball is not yet considered on left
+        # --- REVISED Prediction Logic (Right-to-Left) ---
+        # The main condition for prediction is now based on the PREVIOUS frame's position.
         if not crossed_r_to_l_strictly and not self.ball_on_left_of_center and \
-           len(self.trajectory) >= 2 and self.current_ball_speed_kmh > 0.1 and \
-           ball_x_global >= self.center_x_global : # Only predict if ball is currently on the right or center
+           len(self.trajectory) >= 2 and self.current_ball_speed_kmh > 0.1:
 
             pt1_x, _, pt1_t = self.trajectory[-2] # Previous point
             pt2_x, _, pt2_t = self.trajectory[-1] # Current point (ball_x_global, current_timestamp)
-            
-            delta_t_hist = pt2_t - pt1_t
-            if delta_t_hist > 0:
-                vx_pixels_per_time_unit = (pt2_x - pt1_x) / delta_t_hist
-                
-                # Only predict if ball is moving left with some reasonable velocity
-                # Threshold: moving left by at least 2% of frame width per second equivalent
-                min_vx_for_prediction = - (self.frame_width * 0.02) * (delta_t_hist / (1.0 / (self.display_fps if self.display_fps > 1 else self.target_fps)))
 
-                if vx_pixels_per_time_unit < min_vx_for_prediction : 
-                    for lookahead_frames in [1, 2]: # Predict 1 or 2 frames ahead
-                        time_to_predict = lookahead_frames / (self.display_fps if self.display_fps > 0 else self.target_fps)
-                        predicted_x_at_crossing_time = ball_x_global + vx_pixels_per_time_unit * time_to_predict
-                        predicted_timestamp = current_timestamp + time_to_predict
+            # --- THE CRITICAL CHANGE IS HERE ---
+            # We check if the PREVIOUS point was on the right, not the current one.
+            if pt1_x >= self.center_x_global:
+                delta_t_hist = pt2_t - pt1_t
+                if delta_t_hist > 0:
+                    vx_pixels_per_time_unit = (pt2_x - pt1_x) / delta_t_hist
 
-                        if predicted_x_at_crossing_time < self.center_x_global: # Predicted to cross
-                            # Check if a similar prediction already exists
-                            can_add_prediction = True
-                            for ev in self.event_buffer_center_cross:
-                                if ev.predicted and abs(ev.timestamp - predicted_timestamp) < (1.0 / (self.display_fps if self.display_fps > 0 else self.target_fps)):
-                                    can_add_prediction = False; break
-                            
-                            if can_add_prediction:
-                                if self.debug_mode: print(f"DEBUG REC: Added PREDICTED event. X_pred: {predicted_x_at_crossing_time:.1f} at T_pred: {predicted_timestamp:.3f}")
-                                event = EventRecord(predicted_x_at_crossing_time, predicted_timestamp, self.current_ball_speed_kmh, predicted=True)
-                                self.event_buffer_center_cross.append(event)
-                            break # One prediction per frame is enough
+                    min_vx_for_prediction = - (self.frame_width * 0.005) * (delta_t_hist / (1.0 / (self.display_fps if self.display_fps > 1 else self.target_fps)))
+
+                    # We only predict if the ball is moving left.
+                    if vx_pixels_per_time_unit < min_vx_for_prediction:
+                        for lookahead_frames in [1, 2]: # Predict 1 or 2 frames ahead
+                            time_to_predict = lookahead_frames / (self.display_fps if self.display_fps > 0 else self.target_fps)
+                            predicted_x_at_crossing_time = ball_x_global + vx_pixels_per_time_unit * time_to_predict
+                            predicted_timestamp = current_timestamp + time_to_predict
+
+                            if predicted_x_at_crossing_time < self.center_x_global: # Predicted to cross
+                                can_add_prediction = True
+                                for ev in self.event_buffer_center_cross:
+                                    if ev.predicted and abs(ev.timestamp - predicted_timestamp) < (1.0 / (self.display_fps if self.display_fps > 0 else self.target_fps)):
+                                        can_add_prediction = False; break
+
+                                if can_add_prediction:
+                                    if self.debug_mode: print(f"DEBUG REC: Added PREDICTED event. PrevX: {pt1_x:.1f} -> CurrX: {pt2_x:.1f}. PredX: {predicted_x_at_crossing_time:.1f}")
+                                    event = EventRecord(predicted_x_at_crossing_time, predicted_timestamp, self.current_ball_speed_kmh, predicted=True)
+                                    self.event_buffer_center_cross.append(event)
+                                break # One prediction per frame is enough
         
         self.last_ball_x_global = ball_x_global # Update for next frame's comparison
 

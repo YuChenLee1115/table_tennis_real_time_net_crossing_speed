@@ -26,9 +26,9 @@ import json
 
 # —— 全局參數配置 (These serve as initial defaults for the GUI) ——
 DEFAULT_CAMERA_INDEX = 0
-DEFAULT_TARGET_FPS = 60
-DEFAULT_FRAME_WIDTH = 1280 # Note: Frame width/height from camera might override this for camera source
-DEFAULT_FRAME_HEIGHT = 720
+DEFAULT_TARGET_FPS = 120
+DEFAULT_FRAME_WIDTH = 1920 # Note: Frame width/height from camera might override this for camera source
+DEFAULT_FRAME_HEIGHT = 1080
 DEFAULT_TABLE_LENGTH_CM = 94.0 # Made float for GUI
 
 DEFAULT_DETECTION_TIMEOUT = 0.3
