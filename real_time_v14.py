@@ -428,21 +428,14 @@ class PingPongSpeedTracker:
             self.last_ball_x_global = ball_x_global
             return
 
-        # Update ball's general position relative to center
-        # The CENTER_ZONE_WIDTH_PIXELS provides a small margin
-        if ball_x_global < self.center_x_global - self.CENTER_ZONE_WIDTH_PIXELS:
-            if not self.ball_on_left_of_center and self.debug_mode: print(f"DEBUG REC: Ball now clearly on left (X={ball_x_global}).")
-            self.ball_on_left_of_center = True
-        elif ball_x_global > self.center_x_global + self.CENTER_ZONE_WIDTH_PIXELS:
-            if self.ball_on_left_of_center and self.debug_mode: print(f"DEBUG REC: Ball returned to right (X={ball_x_global}), resetting left flag.")
-            self.ball_on_left_of_center = False # Ball is clearly on the right, reset flag
-
         # --- Actual Crossing Detection (Right-to-Left) ---
+        # *** MODIFICATION 1: We perform the crossing check BEFORE updating the ball's on_left_of_center state.
+        # This prevents a race condition where a fast ball jumps over the center and the margin in one frame.
         crossed_r_to_l_strictly = False
         if self.last_ball_x_global is not None and \
            self.last_ball_x_global >= self.center_x_global and \
            ball_x_global < self.center_x_global and \
-           not self.ball_on_left_of_center: # Crucial: only trigger if we didn't think it was on left already
+           not self.ball_on_left_of_center: # Check against PREVIOUS state
             crossed_r_to_l_strictly = True
             if self.debug_mode:
                 print(f"DEBUG REC: Strict R-L Actual Crossing Detected. PrevX: {self.last_ball_x_global:.1f}, CurrX: {ball_x_global:.1f}. Speed: {self.current_ball_speed_kmh:.1f}")
@@ -451,7 +444,6 @@ class PingPongSpeedTracker:
             event = EventRecord(ball_x_global, current_timestamp, self.current_ball_speed_kmh, predicted=False)
             self.event_buffer_center_cross.append(event)
             if self.debug_mode: print(f"DEBUG REC: Added ACTUAL event to buffer. Buffer size: {len(self.event_buffer_center_cross)}")
-            # self.ball_on_left_of_center will be set to True when this event is *committed*
 
         # --- REVISED Prediction Logic (Right-to-Left) ---
         # The main condition for prediction is now based on the PREVIOUS frame's position.
@@ -461,18 +453,15 @@ class PingPongSpeedTracker:
             pt1_x, _, pt1_t = self.trajectory[-2] # Previous point
             pt2_x, _, pt2_t = self.trajectory[-1] # Current point (ball_x_global, current_timestamp)
 
-            # --- THE CRITICAL CHANGE IS HERE ---
-            # We check if the PREVIOUS point was on the right, not the current one.
             if pt1_x >= self.center_x_global:
                 delta_t_hist = pt2_t - pt1_t
                 if delta_t_hist > 0:
                     vx_pixels_per_time_unit = (pt2_x - pt1_x) / delta_t_hist
-
                     min_vx_for_prediction = - (self.frame_width * 0.005) * (delta_t_hist / (1.0 / (self.display_fps if self.display_fps > 1 else self.target_fps)))
 
-                    # We only predict if the ball is moving left.
                     if vx_pixels_per_time_unit < min_vx_for_prediction:
-                        for lookahead_frames in [1, 2]: # Predict 1 or 2 frames ahead
+                        # *** MODIFICATION 2: Increase lookahead frames to be more aggressive for fast balls.
+                        for lookahead_frames in [1, 2, 3]: # Changed from [1, 2]
                             time_to_predict = lookahead_frames / (self.display_fps if self.display_fps > 0 else self.target_fps)
                             predicted_x_at_crossing_time = ball_x_global + vx_pixels_per_time_unit * time_to_predict
                             predicted_timestamp = current_timestamp + time_to_predict
@@ -484,13 +473,22 @@ class PingPongSpeedTracker:
                                         can_add_prediction = False; break
 
                                 if can_add_prediction:
-                                    if self.debug_mode: print(f"DEBUG REC: Added PREDICTED event. PrevX: {pt1_x:.1f} -> CurrX: {pt2_x:.1f}. PredX: {predicted_x_at_crossing_time:.1f}")
+                                    if self.debug_mode: print(f"DEBUG REC: Added PREDICTED event (lookahead {lookahead_frames}f). PredX: {predicted_x_at_crossing_time:.1f}")
                                     event = EventRecord(predicted_x_at_crossing_time, predicted_timestamp, self.current_ball_speed_kmh, predicted=True)
                                     self.event_buffer_center_cross.append(event)
                                 break # One prediction per frame is enough
         
-        self.last_ball_x_global = ball_x_global # Update for next frame's comparison
+        # *** MODIFICATION 1 (Part 2): Update the state AFTER all checks for this frame are done.
+        # This ensures the state reflects the beginning of the NEXT frame.
+        if ball_x_global < self.center_x_global - self.CENTER_ZONE_WIDTH_PIXELS:
+            if not self.ball_on_left_of_center and self.debug_mode: print(f"DEBUG STATE UPDATE: Ball now clearly on left (X={ball_x_global}).")
+            self.ball_on_left_of_center = True
+        elif ball_x_global > self.center_x_global + self.CENTER_ZONE_WIDTH_PIXELS:
+            if self.ball_on_left_of_center and self.debug_mode: print(f"DEBUG STATE UPDATE: Ball returned to right (X={ball_x_global}), resetting left flag.")
+            self.ball_on_left_of_center = False
 
+        self.last_ball_x_global = ball_x_global # Update for next frame's comparison
+        
     # MODIFIED: New _process_crossing_events
     def _process_crossing_events(self):
         if not self.is_counting_active or self.output_generated_for_session:
