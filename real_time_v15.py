@@ -182,6 +182,7 @@ class FrameReader:
 class PingPongSpeedTracker:
     def __init__(self, video_source=DEFAULT_CAMERA_INDEX, table_length_cm=DEFAULT_TABLE_LENGTH_CM,
                  detection_timeout_s=DEFAULT_DETECTION_TIMEOUT, use_video_file=False,
+                 video_file_path=None,  # <--- 新增此參數
                  target_fps=DEFAULT_TARGET_FPS, frame_width=DEFAULT_FRAME_WIDTH,
                  frame_height=DEFAULT_FRAME_HEIGHT, debug_mode=DEBUG_MODE_DEFAULT,
                  net_crossing_direction=NET_CROSSING_DIRECTION_DEFAULT,
@@ -190,6 +191,7 @@ class PingPongSpeedTracker:
                  far_width_cm=FAR_SIDE_WIDTH_CM_DEFAULT):
         self.debug_mode = debug_mode
         self.use_video_file = use_video_file
+        self.video_file_path = video_file_path # <--- 新增此行以儲存路徑
         self.target_fps = target_fps
 
         self.reader = FrameReader(video_source, target_fps, use_video_file, frame_width, frame_height)
@@ -219,17 +221,13 @@ class PingPongSpeedTracker:
         self.frame_timestamps_for_fps = deque(maxlen=MAX_FRAME_TIMES_FPS_CALC)
 
         self.center_x_global = self.frame_width // 2
-        # CENTER_LINE_WIDTH_PIXELS from v11 was 1000, making it almost full screen.
-        # This seems to have been part of the aggressive detection.
-        # The core logic will be crossing self.center_x_global.
         
         self.net_crossing_direction = net_crossing_direction
         self.max_net_speeds_to_collect = max_net_speeds
         self.collected_net_speeds = []
         self.collected_relative_times = []
-        # self.last_net_crossing_detection_time = 0 # Replaced by last_committed_crossing_time
         self.last_recorded_net_speed_kmh = 0
-        self.last_ball_x_global = None # Stores previous frame's ball x for comparison
+        self.last_ball_x_global = None 
         self.output_generated_for_session = False
         
         self.is_counting_active = False
@@ -245,11 +243,10 @@ class PingPongSpeedTracker:
         self.running = False
         self.file_writer_executor = concurrent.futures.ThreadPoolExecutor(max_workers=2)
 
-        # MODIFIED: New state variables for better crossing detection and reduced duplicates
         self.ball_on_left_of_center = False 
         self.last_committed_crossing_time = 0 
-        self.EFFECTIVE_CROSSING_COOLDOWN_S = 0.2 # Cooldown after a speed is committed (tunable)
-        self.CENTER_ZONE_WIDTH_PIXELS = self.frame_width * 0.05 # 5% of frame width as a margin around center
+        self.EFFECTIVE_CROSSING_COOLDOWN_S = 0.2 
+        self.CENTER_ZONE_WIDTH_PIXELS = self.frame_width * 0.05 
 
         self._precalculate_overlay()
         self._create_perspective_lookup_table()
@@ -632,50 +629,81 @@ class PingPongSpeedTracker:
         session_id_copy = self.count_session_id
         self.file_writer_executor.submit(self._create_output_files, speeds_copy, times_copy, session_id_copy)
 
-    def _create_output_files(self, net_speeds, relative_times, session_id): # Output format unchanged
+    def _create_output_files(self, net_speeds, relative_times, session_id):
         if not net_speeds: return
-        timestamp_str = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-        output_dir_path = f"{OUTPUT_DATA_FOLDER}/{timestamp_str}"
-        os.makedirs(output_dir_path, exist_ok=True)
+
+        output_dir_path = ""
+        base_filename = ""
+
+        # Case 1: Video file input. Use video's path and name prefix.
+        if self.use_video_file and self.video_file_path:
+            try:
+                # 獲取影片所在的目錄
+                output_dir_path = os.path.dirname(self.video_file_path)
+                # 獲取不含副檔名的影片檔名
+                video_filename_stem = os.path.splitext(os.path.basename(self.video_file_path))[0]
+                # 根據 "_" 分割檔名，並取前兩部分作為前綴
+                parts = video_filename_stem.split('_')
+                if len(parts) >= 2:
+                    base_filename = f"{parts[0]}_{parts[1]}"
+                else:
+                    # 如果檔名格式不符，則退回使用完整檔名作為基礎
+                    base_filename = video_filename_stem
+                print(f"Video mode: Saving files with prefix '{base_filename}' to '{output_dir_path}'")
+            except Exception as e:
+                print(f"Error parsing video file path. Falling back to default naming. Error: {e}")
+                # Fallback to default timestamp naming if path parsing fails
+                self.use_video_file = False # Force fallback logic
+
+        # Case 2: Real-time camera input OR fallback from video mode error. Use timestamp.
+        if not self.use_video_file or not self.video_file_path:
+            timestamp_str = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+            output_dir_path = f"{OUTPUT_DATA_FOLDER}/{timestamp_str}"
+            os.makedirs(output_dir_path, exist_ok=True)
+            base_filename = f"speed_data_{timestamp_str}"
+            print(f"Real-time mode: Saving files to '{output_dir_path}'")
 
         avg_speed = sum(net_speeds) / len(net_speeds)
         max_speed = max(net_speeds)
         min_speed = min(net_speeds)
 
-        chart_filename = f'{output_dir_path}/speed_chart_{timestamp_str}.png'
+        # 組合出最終的檔案路徑
+        chart_filename = os.path.join(output_dir_path, f'{base_filename}_chart.png')
+        txt_filename = os.path.join(output_dir_path, f'{base_filename}_data.txt')
+        csv_filename = os.path.join(output_dir_path, f'{base_filename}_data.csv')
+
+        # --- 以下圖表與檔案寫入邏輯不變 ---
         plt.figure(figsize=(12, 7))
         plt.plot(relative_times, net_speeds, 'o-', linewidth=2, markersize=6, label='Speed (km/h)')
         plt.axhline(y=avg_speed, color='r', linestyle='--', label=f'Avg: {avg_speed:.1f} km/h')
         for t, s in zip(relative_times, net_speeds): plt.annotate(f"{s:.1f}", (t, s), textcoords="offset points", xytext=(0,10), ha='center', fontsize=8)
-        plt.title(f'Net Crossing Speeds - Session {session_id} - {timestamp_str}', fontsize=16)
+        plt.title(f'Net Crossing Speeds - Session {session_id} - File: {base_filename}', fontsize=16)
         plt.xlabel('Relative Time (s)', fontsize=12); plt.ylabel('Speed (km/h)', fontsize=12)
         plt.grid(True, linestyle=':', alpha=0.7); plt.legend()
         if relative_times:
             x_margin = (max(relative_times) - min(relative_times)) * 0.05 if len(relative_times) > 1 and max(relative_times) > min(relative_times) else 0.5
             plt.xlim(min(relative_times) - x_margin, max(relative_times) + x_margin)
-        if net_speeds: # Check if net_speeds is not empty for y-axis limits
+        if net_speeds:
             y_range = max_speed - min_speed if max_speed > min_speed else 10
             plt.ylim(max(0, min_speed - y_range*0.1), max_speed + y_range*0.1)
         plt.figtext(0.02, 0.02, f"Count: {len(net_speeds)}, Max: {max_speed:.1f}, Min: {min_speed:.1f} km/h", fontsize=9)
         plt.tight_layout(rect=[0, 0.03, 1, 0.95]); plt.savefig(chart_filename, dpi=150); plt.close()
 
-        txt_filename = f'{output_dir_path}/speed_data_{timestamp_str}.txt'
         with open(txt_filename, 'w') as f:
-            f.write(f"Net Speeds - Session {session_id} - {timestamp_str}\n"); f.write("---------------------------------------\n")
+            f.write(f"Net Speeds - Session {session_id} - File: {base_filename}\n"); f.write("---------------------------------------\n")
             for i, (t, s) in enumerate(zip(relative_times, net_speeds)): f.write(f"{t:.2f}s: {s:.1f} km/h\n")
             f.write("---------------------------------------\n"); f.write(f"Total Points: {len(net_speeds)}\n")
             f.write(f"Average Speed: {avg_speed:.1f} km/h\n"); f.write(f"Maximum Speed: {max_speed:.1f} km/h\n")
             f.write(f"Minimum Speed: {min_speed:.1f} km/h\n")
 
-        csv_filename = f'{output_dir_path}/speed_data_{timestamp_str}.csv'
         with open(csv_filename, 'w', newline='') as f:
             writer = csv.writer(f)
-            writer.writerow(['Session ID', 'Timestamp File', 'Point Number', 'Relative Time (s)', 'Speed (km/h)']) # Corrected header
-            for i, (t, s) in enumerate(zip(relative_times, net_speeds)): writer.writerow([session_id, timestamp_str, i+1, f"{t:.2f}", f"{s:.1f}"])
+            writer.writerow(['Session ID', 'File Prefix', 'Point Number', 'Relative Time (s)', 'Speed (km/h)'])
+            for i, (t, s) in enumerate(zip(relative_times, net_speeds)): writer.writerow([session_id, base_filename, i+1, f"{t:.2f}", f"{s:.1f}"])
             writer.writerow([]); writer.writerow(['Statistic', 'Value']); writer.writerow(['Total Points', len(net_speeds)])
             writer.writerow(['Average Speed (km/h)', f"{avg_speed:.1f}"]); writer.writerow(['Maximum Speed (km/h)', f"{max_speed:.1f}"])
             writer.writerow(['Minimum Speed (km/h)', f"{min_speed:.1f}"])
-        print(f"Output files for session {session_id} saved to {output_dir_path}")
+        print(f"Output files for session {session_id} saved successfully.")
 
     def _draw_visualizations(self, display_frame, frame_data_obj: FrameData): # Logic from v11 seems fine
         vis_frame = display_frame
@@ -806,20 +834,20 @@ class PingPongSpeedTracker:
             self.file_writer_executor.shutdown(wait=True); print("File writer stopped.")
             cv2.destroyAllWindows(); print("System shutdown complete.")
 
-def main(): # Argparse from v11 seems fine
+def main():
     parser = argparse.ArgumentParser(description='Ping Pong Speed Tracker v11 (MODIFIED)')
     parser.add_argument('--video', type=str, default=None, help='Path to video file. If None, uses webcam.')
     parser.add_argument('--camera_idx', type=int, default=DEFAULT_CAMERA_INDEX, help='Webcam index.')
     parser.add_argument('--fps', type=int, default=DEFAULT_TARGET_FPS, help='Target FPS for webcam.')
     parser.add_argument('--width', type=int, default=DEFAULT_FRAME_WIDTH, help='Frame width.')
     parser.add_argument('--height', type=int, default=DEFAULT_FRAME_HEIGHT, help='Frame height.')
-    parser.add_argument('--table_len', type=float, default=DEFAULT_TABLE_LENGTH_CM, help='Table length (cm) for nominal px/cm.') # Changed to float
+    parser.add_argument('--table_len', type=float, default=DEFAULT_TABLE_LENGTH_CM, help='Table length (cm) for nominal px/cm.')
     parser.add_argument('--timeout', type=float, default=DEFAULT_DETECTION_TIMEOUT, help='Ball detection timeout (s).')
     parser.add_argument('--direction', type=str, default=NET_CROSSING_DIRECTION_DEFAULT,
                         choices=['left_to_right', 'right_to_left', 'both'], help='Net crossing direction to record.')
     parser.add_argument('--count', type=int, default=MAX_NET_SPEEDS_TO_COLLECT, help='Number of net speeds to collect per session.')
-    parser.add_argument('--near_width', type=float, default=NEAR_SIDE_WIDTH_CM_DEFAULT, help='Real width (cm) of ROI at near side.') # Changed to float
-    parser.add_argument('--far_width', type=float, default=FAR_SIDE_WIDTH_CM_DEFAULT, help='Real width (cm) of ROI at far side.') # Changed to float
+    parser.add_argument('--near_width', type=float, default=NEAR_SIDE_WIDTH_CM_DEFAULT, help='Real width (cm) of ROI at near side.')
+    parser.add_argument('--far_width', type=float, default=FAR_SIDE_WIDTH_CM_DEFAULT, help='Real width (cm) of ROI at far side.')
     parser.add_argument('--debug', action='store_true', default=DEBUG_MODE_DEFAULT, help='Enable debug printouts.')
     args = parser.parse_args()
 
@@ -829,6 +857,7 @@ def main(): # Argparse from v11 seems fine
     tracker = PingPongSpeedTracker(
         video_source=video_source_arg, table_length_cm=args.table_len,
         detection_timeout_s=args.timeout, use_video_file=use_video_file_arg,
+        video_file_path=args.video,  # <--- 將影片路徑傳遞給新參數
         target_fps=args.fps, frame_width=args.width, frame_height=args.height,
         debug_mode=args.debug, net_crossing_direction=args.direction,
         max_net_speeds=args.count, near_width_cm=args.near_width, far_width_cm=args.far_width
