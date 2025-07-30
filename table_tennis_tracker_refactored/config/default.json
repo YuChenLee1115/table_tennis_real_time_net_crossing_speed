@@ -1,0 +1,57 @@
+{
+  "camera": {
+    "default_index": 0,
+    "target_fps": 60,
+    "frame_width": 1280,
+    "frame_height": 720
+  },
+  "detection": {
+    "timeout_s": 0.2,
+    "roi_start_ratio": 0.4,
+    "roi_end_ratio": 0.6,
+    "roi_bottom_ratio": 0.85,
+    "max_trajectory_points": 120,
+    "max_prev_frames_fmo": 10,
+    "opening_kernel_size_fmo": [12, 12],
+    "closing_kernel_size_fmo": [25, 25],
+    "threshold_value_fmo": 9,
+    "min_ball_area_px": 10,
+    "max_ball_area_px": 10000,
+    "min_ball_circularity": 0.32
+  },
+  "tracking": {
+    "table_length_cm": 70.0,
+    "near_side_width_cm": 29.0,
+    "far_side_width_cm": 72.0,
+    "speed_smoothing_factor": 0.3,
+    "kmh_conversion_factor": 0.036,
+    "max_net_speeds_to_collect": 30,
+    "net_crossing_direction": "right_to_left",
+    "auto_stop_after_collection": false,
+    "crossing_cooldown_s": 0.2,
+    "center_zone_width_ratio": 0.05
+  },
+  "visualization": {
+    "trajectory_color_bgr": [0, 0, 255],
+    "ball_color_bgr": [0, 255, 255],
+    "contour_color_bgr": [255, 0, 0],
+    "roi_color_bgr": [0, 255, 0],
+    "speed_text_color_bgr": [0, 0, 255],
+    "fps_text_color_bgr": [0, 255, 0],
+    "center_line_color_bgr": [0, 255, 255],
+    "net_speed_text_color_bgr": [255, 0, 0],
+    "font_scale": 1.0,
+    "font_thickness": 2,
+    "draw_interval": 2
+  },
+  "io": {
+    "output_data_folder": "real_time_output",
+    "frame_queue_size": 30,
+    "event_buffer_size": 200
+  },
+  "system": {
+    "debug_mode": false,
+    "fps_smoothing_factor": 0.4,
+    "max_frame_times_fps_calc": 20
+  }
+}
