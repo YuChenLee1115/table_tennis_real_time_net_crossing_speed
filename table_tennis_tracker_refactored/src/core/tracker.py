@@ -13,10 +13,12 @@ from ..detection.fmo_detector import FMODetector
 from ..detection.ball_detector import BallDetector
 from ..tracking.speed_calculator import SpeedCalculator
 from ..tracking.crossing_detector import CrossingDetector
+from ..tracking.trajectory_manager import TrajectoryManager
 from ..io.frame_reader import FrameReader
 from ..io.data_exporter import DataExporter
 from ..visualization.renderer import Renderer
 from ..utils.perspective import PerspectiveCorrector
+from ..utils.performance_optimizer import get_performance_optimizer
 
 
 class TableTennisTracker:
@@ -52,12 +54,13 @@ class TableTennisTracker:
         self.frame_timestamps = deque(maxlen=config.max_frame_times_fps_calc)
         self.display_fps = 0.0
         
-        # OpenCV優化
-        cv2.setUseOptimized(True)
-        try:
-            cv2.setNumThreads(4)
-        except AttributeError:
-            pass
+        # 性能優化器
+        self.performance_optimizer = get_performance_optimizer()
+        
+        # 顯示優化狀態
+        if self.config.debug_mode:
+            opt_status = self.performance_optimizer.get_optimization_status()
+            print(f"Performance optimization status: {opt_status}")
     
     def _init_frame_reader(self) -> None:
         """初始化影像讀取器"""
@@ -91,6 +94,11 @@ class TableTennisTracker:
             self.roi_start_x, self.roi_end_x, self.frame_width
         )
         
+        # 軌跡管理器 - 新增用於改善追蹤連續性
+        self.trajectory_manager = TrajectoryManager(
+            max_points=self.config.detection.max_trajectory_points
+        )
+        
         # 速度計算器
         self.speed_calculator = SpeedCalculator(
             self.config.tracking, self.perspective_corrector
@@ -117,9 +125,14 @@ class TableTennisTracker:
         )
     
     def process_frame(self, frame) -> FrameData:
-        """處理單幀"""
+        """處理單幀 - 使用改進的軌跡管理和預測機制"""
         self.frame_counter += 1
         self._update_fps()
+        
+        # 獲取當前時間戳
+        current_timestamp = time.monotonic()
+        if self.use_video_file:
+            current_timestamp = self.frame_counter / self.actual_fps
         
         # 提取ROI並進行FMO偵測
         roi_frame = frame[self.roi_top_y:self.roi_bottom_y, self.roi_start_x:self.roi_end_x]
@@ -128,36 +141,68 @@ class TableTennisTracker:
         
         # 球體偵測
         ball_event = None
+        detection_confidence = 0.0
+        
         if motion_mask is not None:
-            current_timestamp = time.monotonic()
-            if self.use_video_file:
-                current_timestamp = self.frame_counter / self.actual_fps
-                
             ball_event = self.ball_detector.detect_from_motion_mask(
                 motion_mask, current_timestamp, self.use_video_file
             )
-        
-        # 處理球體偵測結果
-        if ball_event:
-            # 更新速度
-            trajectory = self.ball_detector.get_trajectory()
-            current_speed = self.speed_calculator.calculate_speed(trajectory)
             
-            # 穿越偵測（僅在計數激活時）
-            if self.is_counting_active:
-                self.crossing_detector.detect_crossing(
-                    ball_event.position.x_global, ball_event.position.y_global,
-                    ball_event.position.timestamp, trajectory, current_speed
-                )
-        else:
-            current_speed = self.speed_calculator.get_current_speed()
-            # 重置穿越偵測器的當前球位置
-            self.crossing_detector.last_ball_x_global = None
+            if ball_event:
+                detection_confidence = ball_event.circularity  # 使用圓度作為信心度代理
         
-        # 檢查偵測超時
-        if self.ball_detector.is_detection_timeout(time.monotonic()):
-            self.ball_detector.reset_trajectory()
-            self.speed_calculator.reset()
+        # 軌跡管理和預測
+        predicted_point = None
+        if ball_event:
+            # 添加檢測到的點到軌跡管理器
+            success = self.trajectory_manager.add_detection(
+                ball_event.position.x_global, 
+                ball_event.position.y_global,
+                ball_event.position.timestamp,
+                confidence=detection_confidence,
+                metadata={'area': ball_event.area, 'circularity': ball_event.circularity}
+            )
+            
+            if not success and self.config.debug_mode:
+                print(f"Frame {self.frame_counter}: Detection rejected as outlier")
+                
+        else:
+            # 沒有檢測到球體，嘗試預測
+            predicted_point = self.trajectory_manager.handle_missing_detection(current_timestamp)
+            if predicted_point and self.config.debug_mode:
+                print(f"Frame {self.frame_counter}: Using predicted position ({predicted_point.x:.1f}, {predicted_point.y:.1f})")
+        
+        # 獲取當前軌跡用於速度計算
+        trajectory_points = self.trajectory_manager.get_recent_positions(count=20)
+        current_speed = self.speed_calculator.calculate_speed(trajectory_points)
+        
+        # 穿越偵測（僅在計數激活時）
+        if self.is_counting_active:
+            # 使用實際檢測或預測位置
+            if ball_event:
+                detection_x = ball_event.position.x_global
+                detection_y = ball_event.position.y_global
+                detection_time = ball_event.position.timestamp
+            elif predicted_point:
+                detection_x = predicted_point.x
+                detection_y = predicted_point.y  
+                detection_time = predicted_point.timestamp
+            else:
+                detection_x = detection_y = detection_time = None
+            
+            if detection_x is not None:
+                self.crossing_detector.detect_crossing(
+                    detection_x, detection_y, detection_time, 
+                    trajectory_points, current_speed
+                )
+        
+        # 檢查軌跡超時並重置
+        time_since_detection = current_timestamp - self.trajectory_manager.last_detection_time
+        if time_since_detection > self.config.detection.timeout_s:
+            if self.trajectory_manager.trajectory_active:
+                if self.config.debug_mode:
+                    print(f"Frame {self.frame_counter}: Trajectory timeout, resetting")
+                self._reset_tracking_components()
         
         # 處理穿越事件
         if self.is_counting_active:
@@ -178,10 +223,10 @@ class TableTennisTracker:
             frame_counter=self.frame_counter
         )
         
-        # 添加軌跡點
-        trajectory = self.ball_detector.get_trajectory()
-        if trajectory:
-            frame_data.trajectory_points_global = [(int(p[0]), int(p[1])) for p in trajectory]
+        # 添加軌跡點 - 使用軌跡管理器的數據
+        trajectory_points = self.trajectory_manager.get_trajectory_points(smoothed=True, max_age_s=2.0)
+        if trajectory_points:
+            frame_data.trajectory_points_global = [(int(p.x), int(p.y)) for p in trajectory_points]
         
         # 添加除錯信息
         if self.config.debug_mode:
@@ -256,14 +301,44 @@ class TableTennisTracker:
             if self.config.tracking.auto_stop_after_collection:
                 self.is_counting_active = False
     
+    def _reset_tracking_components(self) -> None:
+        """重置追蹤組件狀態"""
+        self.trajectory_manager.reset()
+        self.ball_detector.reset()
+        self.speed_calculator.reset()
+        self.crossing_detector.reset_state()
+        
+        if self.config.debug_mode:
+            print("Tracking components reset due to timeout")
+    
     def _generate_debug_text(self) -> str:
-        """生成除錯文字"""
-        trajectory_len = len(self.ball_detector.get_trajectory())
+        """生成除錯文字 - 包含軌跡管理器統計"""
+        # 軌跡管理器統計
+        traj_stats = self.trajectory_manager.get_statistics()
+        trajectory_len = traj_stats['trajectory_length']
+        missing_count = traj_stats['missing_detection_count']
+        predictions = traj_stats['predictions_made']
+        
+        # 速度計算器統計
+        speed_stats = self.speed_calculator.get_speed_statistics()
+        speed_confidence = speed_stats['speed_confidence']
+        
+        # 檢測器統計
+        detection_stats = self.ball_detector.get_detection_statistics()
+        success_rate = detection_stats['success_rate']
+        
+        # 事件管理器統計
         buffer_len = len(self.event_manager.crossing_events)
         on_left = "Y" if self.crossing_detector.ball_on_left_of_center else "N"
         last_commit_time = self.event_manager.last_committed_crossing_time
         
-        return f"Traj:{trajectory_len} EvtBuf:{buffer_len} OnLeft:{on_left} LastCommitT:{last_commit_time:.2f}"
+        # FMO 檢測品質
+        fmo_quality = self.fmo_detector.get_detection_quality()
+        
+        return (f"Traj:{trajectory_len} Miss:{missing_count} Pred:{predictions} "
+                f"DetSR:{success_rate:.2f} SpeedConf:{speed_confidence:.2f} "
+                f"FMO:{fmo_quality:.2f} EvtBuf:{buffer_len} OnLeft:{on_left} "
+                f"LastCommitT:{last_commit_time:.2f}")
     
     def toggle_counting(self) -> None:
         """切換計數狀態"""

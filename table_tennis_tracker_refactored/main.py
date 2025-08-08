@@ -13,6 +13,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), 'src'))
 
 from src.core.config import create_default_config
 from src.core.tracker import TableTennisTracker
+from src.utils.performance_optimizer import initialize_performance_optimization, cleanup_performance_optimization
 
 
 def parse_arguments():
@@ -105,7 +106,12 @@ def create_config_from_args(args):
 
 def main():
     """主函數"""
+    optimizer = None
     try:
+        # 初始化性能優化
+        print("Initializing performance optimizations for Apple Silicon...")
+        optimizer = initialize_performance_optimization()
+        
         # 解析參數
         args = parse_arguments()
         
@@ -132,6 +138,11 @@ def main():
     except Exception as e:
         print(f"Error: {e}")
         return 1
+    finally:
+        # 清理性能優化資源
+        if optimizer:
+            print("Cleaning up performance optimizations...")
+            cleanup_performance_optimization()
     
     return 0
 
