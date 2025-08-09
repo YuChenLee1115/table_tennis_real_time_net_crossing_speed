@@ -107,15 +107,41 @@ class BallDetector:
         
     def detect_from_motion_mask(self, motion_mask: np.ndarray, current_timestamp: float, 
                                use_video_timing: bool = False) -> Optional[BallDetectionEvent]:
-        """從運動遮罩中偵測球體 - 改進版本
+        """從運動遮罩中偵測球體 - 改進版本使用多重評分和預測機制
+        
+        這是球體檢測的主函數，整合了輪廓分析、特徵評估、軌跡預測等多種技術：
+        
+        處理流程：
+        1. 輪廓檢測：在運動遮罩中尋找所有可能的球體候選
+        2. 特徵分析：計算每個候選的面積、圓度、實心度等幾何特徵
+        3. 多重評分：基於形狀特徵、軌跡一致性、大小一致性等進行綜合評分
+        4. 卡爾曼預測：當沒有有效候選時，使用卡爾曼濾波器預測位置
+        5. 軌跡更新：更新球體軌跡歷史和統計資訊
+        
+        評分機制：
+        - 圓度評分（25%）：越接近圓形分數越高
+        - 大小一致性（25%）：與歷史大小的一致性
+        - 軌跡一致性（30%）：與預測軌跡的符合程度  
+        - 形狀特徵（20%）：長寬比、實心度、填充度的綜合評估
         
         Args:
-            motion_mask: 運動物體的二值化遮罩
-            current_timestamp: 當前時間戳
-            use_video_timing: 是否使用視頻計時
+            motion_mask (np.ndarray): 運動物體的二值化遮罩（255為運動區域）
+            current_timestamp (float): 當前時間戳（秒）
+            use_video_timing (bool): 是否使用視頻檔案的計時模式
             
         Returns:
-            球體檢測事件，包含位置和品質資訊
+            Optional[BallDetectionEvent]: 球體檢測事件，包含：
+                - position: 球體位置（ROI和全局座標）
+                - area: 球體面積
+                - circularity: 圓度評分
+                - contour: 原始輪廓資料
+                若沒有檢測到有效球體則返回None
+                
+        性能特點：
+            - 實時多候選評估和比較
+            - 異常值自動過濾
+            - 軌跡連續性保證
+            - 自適應評分權重調整
         """
         self.detection_stats['total_attempts'] += 1
         

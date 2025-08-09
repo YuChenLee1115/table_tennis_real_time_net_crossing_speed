@@ -17,7 +17,27 @@ from src.utils.performance_optimizer import initialize_performance_optimization,
 
 
 def parse_arguments():
-    """解析命令行參數"""
+    """解析命令行參數
+    
+    解析並驗證用戶輸入的命令行參數，包括視頻源、相機設定、檢測參數、
+    追蹤參數和系統設定。提供詳細的幫助信息和使用範例。
+    
+    Returns:
+        argparse.Namespace: 包含所有解析後參數的命名空間對象
+        
+    參數說明:
+        --video: 視頻檔案路徑，若未指定則使用攝像頭
+        --camera_idx: 攝像頭索引號（預設：0）
+        --fps: 目標幀率（預設：60）
+        --width/--height: 影像解析度（預設：1280x720）
+        --timeout: 球體檢測超時時間（預設：0.2秒）
+        --table_len: 桌子長度，用於像素/公分比例計算（預設：70公分）
+        --near_width/--far_width: 近端/遠端寬度，用於透視校正（預設：29/72公分）
+        --direction: 網線穿越方向（right_to_left/left_to_right/both）
+        --count: 每次收集的網線穿越速度數量（預設：30）
+        --cooldown: 穿越事件冷卻時間（預設：0.2秒）
+        --debug: 開啟除錯模式
+    """
     parser = argparse.ArgumentParser(
         description='Table Tennis Speed Tracker (Refactored)',
         formatter_class=argparse.RawDescriptionHelpFormatter,
@@ -78,7 +98,23 @@ Examples:
 
 
 def create_config_from_args(args):
-    """根據命令行參數創建配置"""
+    """根據命令行參數創建系統配置
+    
+    將解析後的命令行參數轉換為系統配置對象，覆蓋預設配置中的相應設定。
+    這允許用戶在不修改配置文件的情況下，通過命令行參數調整系統行為。
+    
+    Args:
+        args (argparse.Namespace): parse_arguments()返回的參數對象
+        
+    Returns:
+        SystemConfig: 更新後的系統配置對象
+        
+    配置更新項目:
+        - 相機配置：索引、幀率、解析度
+        - 檢測配置：超時時間
+        - 追蹤配置：桌子尺寸、透視校正參數、穿越檢測設定
+        - 系統配置：除錯模式
+    """
     config = create_default_config()
     
     # 更新攝像頭配置
@@ -105,7 +141,27 @@ def create_config_from_args(args):
 
 
 def main():
-    """主函數"""
+    """主函數 - 系統入口點
+    
+    程序的主要執行流程，負責：
+    1. 初始化Apple Silicon性能優化
+    2. 解析命令行參數並創建配置
+    3. 確定視頻源（攝像頭或影片檔案）
+    4. 創建並運行桌球追蹤器
+    5. 處理異常情況和用戶中斷
+    6. 清理系統資源
+    
+    Returns:
+        int: 程序退出碼（0：成功，1：錯誤）
+        
+    異常處理:
+        - KeyboardInterrupt: 用戶按下Ctrl+C中斷程序
+        - 其他Exception: 程序運行中的其他錯誤
+        
+    資源管理:
+        - 自動清理性能優化器資源
+        - 確保在任何情況下都能正確清理
+    """
     optimizer = None
     try:
         # 初始化性能優化

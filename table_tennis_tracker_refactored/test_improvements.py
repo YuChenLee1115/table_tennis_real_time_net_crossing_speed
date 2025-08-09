@@ -8,6 +8,7 @@ import sys
 import os
 import time
 import numpy as np
+import cv2
 
 # 添加src路徑
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), 'src'))
@@ -44,7 +45,7 @@ def test_performance_optimizer():
     # 性能比較
     print("\n性能測試 - 高斯模糊:")
     
-    # 標準方法
+    # 導入cv2
     import cv2
     perf_standard = optimizer.profile_performance(
         cv2.GaussianBlur, test_image, (15, 15), 0, iterations=5
